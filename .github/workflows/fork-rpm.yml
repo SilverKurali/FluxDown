@@ -129,12 +129,15 @@ jobs:
         run: |
           set -euo pipefail
           RPM=$(ls build/rpm/rpmbuild/RPMS/x86_64/fluxdown-*.rpm | head -n1)
+          BASE=$(basename "$RPM")
           echo "RPM=$RPM"
           cp "$RPM" build/rpm/fluxdown-latest-linux-x64.rpm
+          NOTES=$(printf '滚动更新：每日自动同步上游 main 并构建的 Fedora RPM。\n\n- 版本：%s（源码 main@%s）\n- 安装：sudo dnf install ./fluxdown-latest-linux-x64.rpm\n- 升级同命令，Release 号随构建单调递增\n' \
+            "$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$RPM")" "$(git rev-parse --short HEAD)")
           gh release view fork-rpm >/dev/null 2>&1 || \
-            gh release create fork-rpm --prerelease \
-              --title "FluxDown Fedora RPM（滚动）" \
-              --notes "每日自动同步上游 main 并构建的 Fedora RPM。安装：sudo dnf install ./fluxdown-latest-linux-x64.rpm"
+            gh release create fork-rpm \
+              --title "FluxDown Fedora RPM（滚动更新）" --notes "$NOTES"
+          gh release edit fork-rpm --title "FluxDown Fedora RPM（滚动更新）" --notes "$NOTES"
           # 滚动 release 只保留固定名 latest 与本次版本化产物
           for name in $(gh release view fork-rpm --json assets --jq '.assets[].name' \
               | grep '\.rpm$' | grep -v '^fluxdown-latest-linux-x64.rpm$'); do
