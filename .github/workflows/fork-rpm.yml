@@ -14,7 +14,9 @@ name: Fork RPM
 
 on:
   schedule:
-    - cron: "0 22 * * *" # 每日 UTC 22:00 = 北京 06:00
+    - cron: "0 23 * * *" # 北京 07:00
+    - cron: "0 4 * * *"  # 北京 12:00
+    - cron: "0 13 * * *" # 北京 21:00
   workflow_dispatch:
   push:
     branches: [main]
