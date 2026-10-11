@@ -105,7 +105,8 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
-          FULL=$(git describe --tags | sed 's/^v//') # 例：0.5.6-rc.1-7-g00a29ed3
+          # 只匹配上游版本 tag（v*）；滚动 release 的 tag fork-rpm 也会进 refs/tags，必须排除
+          FULL=$(git describe --tags --match 'v*' | sed 's/^v//') # 例：0.5.6-rc.1-7-g00a29ed3
           VERSION="${FULL%%-*}"
           if [[ "$FULL" == *-* ]]; then
             PREREL="${FULL#*-}"; PREREL="${PREREL%%-*}" # rc.1
@@ -114,6 +115,7 @@ jobs:
               VERSION="${VERSION}~${PREREL}"
             fi
           fi
+          [[ "$VERSION" =~ ^[0-9] ]] || { echo "bad VERSION=$VERSION"; exit 1; }
           echo "VERSION=$VERSION RELEASE=$((RUN_NUMBER + 100))"
           VERSION="$VERSION" RELEASE=$((RUN_NUMBER + 100)) BIN_DIR=target/release \
             bash packaging/rpm/build_rpm.sh
