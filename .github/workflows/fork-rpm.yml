@@ -1,0 +1,138 @@
+# ── Fork 专用：同步上游 main 并构建 Fedora RPM 滚动发布 ──
+# 仅存在于 SilverKurali/FluxDown fork，上游 zerx-lab/FluxDown 不含本文件。
+#
+# 行为：
+#   schedule（每日） / push(main) / workflow_dispatch →
+#   1. sync-upstream：上游 main 有新提交时合并进 fork main（含 tags）并推送；
+#   2. build-rpm：release 构建 4 个二进制 → rpmbuild（packaging/rpm/）→
+#      上传到滚动预发布 `fork-rpm`（固定名 fluxdown-latest-linux-x64.rpm + 版本化文件名）。
+#   schedule 且上游无更新时跳过构建；push / 手动触发总是构建。
+#
+# RPM Release = run_number + 100：单调递增且恒大于本地手工构建的 -1/-2，保证 dnf 升级语义。
+# 云账户功能需要 FLUXCLOUD_BASE_URL secret（与官方构建一致；未配置时回退 127.0.0.1:8720）。
+name: Fork RPM
+
+on:
+  schedule:
+    - cron: "0 22 * * *" # 每日 UTC 22:00 = 北京 06:00
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-rpm
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_REPO: https://github.com/zerx-lab/FluxDown.git
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      updated: ${{ steps.sync.outputs.updated }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream main
+        id: sync
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch upstream main --tags --no-recurse-submodules
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$BEHIND"
+          if [ "$BEHIND" = "0" ]; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "fork-sync-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit upstream/main
+          git push origin main
+          git push origin --tags
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+  build-rpm:
+    needs: sync-upstream
+    if: needs.sync-upstream.outputs.updated == 'true' || github.event_name != 'schedule'
+    runs-on: ubuntu-22.04
+    steps:
+      # 固定 checkout main 分支头：schedule 触发时 github.sha 可能仍指向同步前的提交
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Ensure upstream tags for version derivation
+        run: |
+          git remote | grep -qx upstream || git remote add upstream "$UPSTREAM_REPO"
+          git fetch upstream main --tags --no-recurse-submodules
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y rpm \
+            clang cmake pkg-config \
+            libasound2-dev libfontconfig-dev libfreetype-dev libglib2.0-dev \
+            libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libvulkan-dev libzstd-dev libdbus-1-dev \
+            libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
+          rpmbuild --version
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fork-rpm-x86_64
+          cache-on-failure: true
+
+      - name: Build desktop, agent, daemon and browser relay
+        run: |
+          cargo build --locked --release \
+            -p fluxdown_ui_app -p fluxdown_agent -p fluxdown_daemon -p fluxdown_nmh \
+            --features fluxdown_agent/desktop --bins
+
+      - name: Build RPM
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          FULL=$(git describe --tags | sed 's/^v//') # 例：0.5.6-rc.1-7-g00a29ed3
+          VERSION="${FULL%%-*}"
+          if [[ "$FULL" == *-* ]]; then
+            PREREL="${FULL#*-}"; PREREL="${PREREL%%-*}" # rc.1
+            # 纯数字段 = tag 之后的提交数，属正式版快照，不加 '~'
+            if [[ ! "$PREREL" =~ ^[0-9]+$ ]]; then
+              VERSION="${VERSION}~${PREREL}"
+            fi
+          fi
+          echo "VERSION=$VERSION RELEASE=$((RUN_NUMBER + 100))"
+          VERSION="$VERSION" RELEASE=$((RUN_NUMBER + 100)) BIN_DIR=target/release \
+            bash packaging/rpm/build_rpm.sh
+
+      - name: Publish to rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RPM=$(ls build/rpm/rpmbuild/RPMS/x86_64/fluxdown-*.rpm | head -n1)
+          echo "RPM=$RPM"
+          cp "$RPM" build/rpm/fluxdown-latest-linux-x64.rpm
+          gh release view fork-rpm >/dev/null 2>&1 || \
+            gh release create fork-rpm --prerelease \
+              --title "FluxDown Fedora RPM（滚动）" \
+              --notes "每日自动同步上游 main 并构建的 Fedora RPM。安装：sudo dnf install ./fluxdown-latest-linux-x64.rpm"
+          # 滚动 release 只保留固定名 latest 与本次版本化产物
+          for name in $(gh release view fork-rpm --json assets --jq '.assets[].name' \
+              | grep '\.rpm$' | grep -v '^fluxdown-latest-linux-x64.rpm$'); do
+            gh release delete-asset fork-rpm "$name" --yes || :
+          done
+          gh release upload fork-rpm "$RPM" build/rpm/fluxdown-latest-linux-x64.rpm --clobber
