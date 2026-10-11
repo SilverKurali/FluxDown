@@ -15,7 +15,7 @@ BuildArch:      x86_64
 # 名称按 Fedora 包名书写），保证 dnf 安装时依赖可解析。
 Requires:       gtk3, glib2, cairo, gdk-pixbuf2, pango, atk
 Requires:       alsa-lib, fontconfig, freetype
-Requires:       libxkbcommon, libxkbcommon-x11, libX11, libxcb, wayland
+Requires:       libxkbcommon, libxkbcommon-x11, libX11, libxcb, libwayland-client
 Requires:       dbus-libs, vulkan-loader, sqlite-libs
 Requires:       libayatana-appindicator-gtk3, xdotool
 Requires(post): desktop-file-utils, gtk3
