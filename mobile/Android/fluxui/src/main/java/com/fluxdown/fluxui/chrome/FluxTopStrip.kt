@@ -82,7 +82,7 @@ fun FluxTopStrip(
     Row(
         modifier
             .fillMaxWidth()
-            .height(46.dp)
+            .height(48.dp)
             .chromeFade(translateY = (-14).dp, scaleFrom = 0.96f, pivotY = 0f) { presence.progress.value }
             .fluxPressable(onClick = onClick, scale = 0.98f, enabled = visible, role = Role.Button)
             .floatingChromeSurface(shape)
@@ -112,7 +112,7 @@ fun FluxTopStrip(
             contentDescription = if (allPaused) resumeDescription else pauseDescription,
             onClick = onTogglePause,
             size = 36.dp,
-            iconSize = 16.dp,
+            iconSize = 18.dp,
             enabled = visible,
         )
     }

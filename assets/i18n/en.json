@@ -1204,6 +1204,8 @@
   "btEnableDhtDesc": "Distributed Hash Table for trackerless peer discovery",
   "btEnableUpnp": "Enable UPnP Port Mapping",
   "btEnableUpnpDesc": "Auto-configure router port forwarding for better connectivity",
+  "btEnableUtp": "Enable uTP",
+  "btEnableUtpDesc": "Also connect to peers over uTP (UDP) to reach more peers behind NAT; uses more CPU than TCP",
   "btListenPort": "Listen Port Range",
   "btListenPortDesc": "Port range for incoming BT connections",
   "btListenPortStart": "Start Port",

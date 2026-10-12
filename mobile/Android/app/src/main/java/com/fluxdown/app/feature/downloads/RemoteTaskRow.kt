@@ -312,7 +312,9 @@ internal fun RemoteTaskRow(entry: RemoteRowEntry, style: RowStyle, flowIndex: In
     }
     val endActions = buildList {
         if (allows(RemoteCommandAction.Cancel)) add(FluxSwipeAction(s.cancel, FluxIcons.X, FluxSwipeTone.Warn) { issue(RemoteCommandAction.Cancel) })
-        if (allows(RemoteCommandAction.Delete)) add(FluxSwipeAction(s.delete, FluxIcons.Trash2, FluxSwipeTone.Danger, ::confirmDelete))
+        if (allows(RemoteCommandAction.Delete)) {
+            add(FluxSwipeAction(s.delete, FluxIcons.Trash2, FluxSwipeTone.Danger, showLabel = false, onClick = ::confirmDelete))
+        }
     }
     val customActions = if (a11y) {
         menuItems().filterIsInstance<FluxMenuItem.Action>().map { a -> CustomAccessibilityAction(a.label) { a.onClick(); true } }

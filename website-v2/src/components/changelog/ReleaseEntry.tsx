@@ -111,7 +111,7 @@ export default function ReleaseEntry({ release, lang, dateLabel, relativeLabel }
                   {items.map(({ asset, sub }) => (
                     <li key={asset.name}>
                       <a
-                        href={assetDownloadUrl(asset, "github")}
+                        href={assetDownloadUrl(asset, "auto")}
                         target="_blank"
                         rel="noopener nofollow"
                         title={asset.name}
@@ -122,7 +122,7 @@ export default function ReleaseEntry({ release, lang, dateLabel, relativeLabel }
                         <Download size={13} strokeWidth={1.75} className="text-subtle" aria-hidden="true" />
                       </a>
                       <a
-                        href={assetDownloadUrl(asset, "oss")}
+                        href={assetDownloadUrl(asset, "github")}
                         target="_blank"
                         rel="noopener nofollow"
                         title={`${download[lang].source.backup}: ${asset.name}`}

@@ -1,7 +1,7 @@
 /**
  * 下载页客户端逻辑(由 download.astro 的 <script> 引入,仅在存在 [data-dl-root] 时运行)。
  *
- * - 拉取 /api/release(?channel=frontier),默认使用 GitHub 直链,显式提供 OSS 备用链接;
+ * - 拉取 /api/release(?channel=frontier),默认使用 CF 缓存 → OSS 回源 → GitHub 兜底,提供 GitHub 备用直链;
  *   失败时保留服务端渲染的 GitHub Releases 回退链接并显示错误条。
  * - 识别访客 OS / CPU 架构,决定首屏主按钮;`D` 键在本页直接触发主按钮。
  * - 复制按钮、邮件订阅表单。
@@ -132,9 +132,9 @@ function init(root: HTMLElement) {
         backup.removeAttribute("href");
         continue;
       }
-      backup.href = assetDownloadUrl(asset, "oss");
+      backup.href = assetDownloadUrl(asset, "github");
       backup.title = `${t.source.backup}: ${asset.name}`;
-      row.href = assetDownloadUrl(asset, "github");
+      row.href = assetDownloadUrl(asset, "auto");
       row.target = "_blank";
       row.rel = "noopener nofollow";
       row.title = asset.name;
@@ -257,10 +257,10 @@ function init(root: HTMLElement) {
     const primaryBackup = $<HTMLAnchorElement>("[data-primary-backup]")!;
     primaryBackup.hidden = !pick.asset;
     if (pick.asset) {
-      primary.href = assetDownloadUrl(pick.asset, "github");
+      primary.href = assetDownloadUrl(pick.asset, "auto");
       primary.target = "_blank";
       primary.rel = "noopener nofollow";
-      primaryBackup.href = assetDownloadUrl(pick.asset, "oss");
+      primaryBackup.href = assetDownloadUrl(pick.asset, "github");
       primary.title = pick.asset.name;
       primaryLabel.textContent = pick.label;
     } else {
@@ -275,11 +275,11 @@ function init(root: HTMLElement) {
     altLink.hidden = !pick.alt;
     altBackup.hidden = !pick.alt;
     if (pick.alt) {
-      altLink.href = assetDownloadUrl(pick.alt.asset, "github");
+      altLink.href = assetDownloadUrl(pick.alt.asset, "auto");
       altLink.target = "_blank";
       altLink.rel = "noopener nofollow";
       altLink.textContent = t.hero.alt(pick.alt.label);
-      altBackup.href = assetDownloadUrl(pick.alt.asset, "oss");
+      altBackup.href = assetDownloadUrl(pick.alt.asset, "github");
       altBackup.textContent = `${t.source.backup} · ${pick.alt.label}`;
     } else {
       altLink.removeAttribute("href");

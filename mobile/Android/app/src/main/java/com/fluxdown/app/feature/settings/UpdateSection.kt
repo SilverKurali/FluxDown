@@ -37,6 +37,7 @@ import com.fluxdown.fluxui.controls.FluxSwitchRow
 import com.fluxdown.fluxui.controls.GlassSection
 import com.fluxdown.fluxui.controls.SelectOption
 import com.fluxdown.fluxui.icons.FluxIcons
+import com.fluxdown.fluxui.markdown.FluxMarkdown
 import com.fluxdown.fluxui.overlay.FluxDialogButton
 import com.fluxdown.fluxui.overlay.FluxDialogButtonStyle
 import com.fluxdown.fluxui.overlay.FluxDialogSpec
@@ -82,6 +83,7 @@ internal fun UpdateSection(ctx: SettingsCtx, openPicker: (PickerSpec) -> Unit) {
     val cancelLabel = str(R.string.cancel)
     // 更新说明按系统语言取区块（同 GPUI 关于页：跟随系统语言，不跟随手动界面语言）。
     val locale = LocalConfiguration.current.locales[0].toLanguageTag()
+    var notesOverflow by remember(status.notes, locale) { mutableStateOf(false) }
     val notes = remember(status.notes, notesExpanded, locale) {
         status.notes.take(if (notesExpanded) NOTES_EXPANDED_MAX else 1)
             .map { it.copy(body = UpdateView.localizedReleaseBody(it.body, locale)) }
@@ -163,10 +165,17 @@ internal fun UpdateSection(ctx: SettingsCtx, openPicker: (PickerSpec) -> Unit) {
                     for (note in notes) {
                         FluxText("v${note.version}", style = t.mono, color = c.ink)
                         if (note.body.isNotBlank()) {
-                            FluxText(note.body.trim(), style = t.sm, color = c.inkMuted, maxLines = if (notesExpanded) Int.MAX_VALUE else 6)
+                            FluxMarkdown(
+                                markdown = note.body.trim(),
+                                maxLines = if (notesExpanded) Int.MAX_VALUE else 6,
+                                onOpenLink = { url -> openLink(context, overlays, url, noBrowser) },
+                                onTextLayout = { layout ->
+                                    if (!notesExpanded) notesOverflow = layout.hasVisualOverflow
+                                },
+                            )
                         }
                     }
-                    if (status.notes.size > 1 || notes.first().body.length > 200) {
+                    if (status.notes.size > 1 || notesOverflow || notesExpanded) {
                         FluxButton(
                             text = str(if (notesExpanded) R.string.mobileUpdateNotesCollapse else R.string.mobileUpdateNotesExpand),
                             onClick = { notesExpanded = !notesExpanded },

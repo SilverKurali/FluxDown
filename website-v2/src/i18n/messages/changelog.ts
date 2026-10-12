@@ -31,7 +31,7 @@ export const changelog = defineMessages({
     copied: "Copied",
     permalink: (version: string) => `Link to ${version}`,
     downloads: (n: number) => `Downloads · ${n} file${n === 1 ? "" : "s"}`,
-    assetsNote: "Downloads use GitHub by default. If a download fails or is too slow, use the backup link for the same file.",
+    assetsNote: "Downloads use Cloudflare cache first, fetch from OSS on a cache miss, and automatically fall back to GitHub if OSS fails. You can also use the GitHub backup link for the same file.",
     textHeader: (tag: string) => `FluxDown ${tag} release notes`,
     asset: {
       installer: "installer",
@@ -72,7 +72,7 @@ export const changelog = defineMessages({
     copied: "已复制",
     permalink: (version: string) => `${version} 的链接`,
     downloads: (n: number) => `下载 · ${n} 个文件`,
-    assetsNote: "默认通过 GitHub 下载。无法下载或速度过慢时，可使用同一文件的备用下载链接。",
+    assetsNote: "默认优先通过 Cloudflare 缓存下载，未命中时从 OSS 回源，OSS 失败后自动回退 GitHub。也可使用同一文件的 GitHub 备用链接。",
     textHeader: (tag: string) => `FluxDown ${tag} 更新日志`,
     asset: {
       installer: "安装包",

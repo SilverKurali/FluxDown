@@ -2,6 +2,7 @@ package com.fluxdown.fluxui.chrome
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
@@ -59,7 +60,6 @@ import com.fluxdown.fluxui.material.FluxBlur
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.FluxGlassKind
 import com.fluxdown.fluxui.material.fluxGlass
-import com.fluxdown.fluxui.material.fluxAccentSurface
 import com.fluxdown.fluxui.theme.FluxGlassMode
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
@@ -102,18 +102,16 @@ class FluxOrbState internal constructor() {
 @Composable
 fun rememberFluxOrbState(): FluxOrbState = remember { FluxOrbState() }
 
-private val OrbSize = 64.dp
-
 /**
- * 新建球（01 §12.3）：64dp 强调色球（[fluxAccentSurface]，全应用最高的投影层级，§5.5）。
+ * 新建球（01 §12.3）：与导航坞等高的强调色实心按钮，仅以色彩与细边界突出，不使用投影。
  *
  * - 点按 → [onClick]；按住 [com.fluxdown.fluxui.theme.FluxMotion.orbHoldMs]（380ms）→ `longPress` 触感 + 扇形展开
  *   （由 [FluxOrbFanLayer] 绘制），手指滑过扇形项每进入新项 `tick`，在项上松手 → `confirm` + [onAction]，落空则收起。
- * - [selectionMode]：球就地变形为“退出选择”（Real 玻璃 G4、ink 图标、`+` 转 45°），点按 = [onClick]，不展开扇形。
- * - [mini]：缩放 0.8（坞迷你态）。
+ * - [selectionMode]：球就地变形为“退出选择”（与导航坞同一不透明面、ink 图标、`+` 转 45°），点按 = [onClick]，不展开扇形。
+ * - [mini]：视觉缩至主题 touch 大小；手势区域保持 dockHeight。
  * - a11y：`Role.Button`；`customActions` 等价于扇形各项（TalkBack 用户无需按住）。
  *
- * 球自身尺寸固定 64×64，位置由应用摆放；其根坐标位置经 [state] 传给扇形层。
+ * 球自身宽高均为主题 dockHeight，位置由应用摆放；其根坐标位置经 [state] 传给扇形层。
  */
 @Composable
 fun FluxOrb(
@@ -131,6 +129,8 @@ fun FluxOrb(
     val motion = FluxTheme.motion
     val haptics = FluxTheme.haptics
     val holdMs = motion.orbHoldMs
+    val orbSize = FluxTheme.space.dockHeight
+    val miniScale = (FluxTheme.space.touch / orbSize).coerceAtMost(1f)
     SideEffect { state.actions = actions }
 
     val onClickState = rememberUpdatedState(onClick)
@@ -140,7 +140,7 @@ fun FluxOrb(
     val coords = remember { arrayOfNulls<LayoutCoordinates>(1) }
     val fanEnabled = !selectionMode && actions.isNotEmpty()
 
-    // 缩放：按压（press 弹簧）× 状态（迷你 .8 / 按住 1.06，fluid 弹簧）。
+    // 缩放只作用于视觉层，外层手势区域保持完整尺寸。
     val pressScale = remember { Animatable(1f) }
     val stateScale = remember { Animatable(1f) }
     val rotation = remember { Animatable(0f) }
@@ -149,8 +149,8 @@ fun FluxOrb(
     LaunchedEffect(pressed, motion) {
         pressScale.animateTo(if (pressed) 0.92f else 1f, motion.of(motion.press))
     }
-    LaunchedEffect(mini, fanOpen, motion) {
-        val base = if (mini) 0.8f else 1f
+    LaunchedEffect(mini, fanOpen, motion, miniScale) {
+        val base = if (mini) miniScale else 1f
         stateScale.animateTo(if (fanOpen) base * 1.06f else base, motion.of(motion.fluid))
     }
     LaunchedEffect(fanOpen, selectionMode, motion) {
@@ -165,7 +165,7 @@ fun FluxOrb(
 
     Box(
         modifier
-            .size(OrbSize)
+            .size(orbSize)
             .onGloballyPositioned {
                 coords[0] = it
                 state.orbRect = it.boundsInRoot()
@@ -244,7 +244,7 @@ fun FluxOrb(
                     scaleY = s
                 },
         ) {
-            // 强调色球：投影 + 纯色面（选择模式淡出）。
+            // 强调色实心面，不通过阴影或辉光拔高层级（选择模式淡出）。
             Box(
                 Modifier
                     .fillMaxSize()
@@ -252,7 +252,8 @@ fun FluxOrb(
                         alpha = 1f - sel.value.coerceIn(0f, 1f)
                         compositingStrategy = CompositingStrategy.ModulateAlpha
                     }
-                    .fluxAccentSurface(c, CircleShape, lift = 10.dp),
+                    .background(c.accentFill, CircleShape)
+                    .border(0.5.dp, c.onAccent.copy(alpha = 0.16f), CircleShape),
             )
             if (glassComposed) {
                 Box(
@@ -262,24 +263,24 @@ fun FluxOrb(
                             alpha = sel.value.coerceIn(0f, 1f)
                             compositingStrategy = CompositingStrategy.ModulateAlpha
                         }
-                        .fluxGlass(FluxGlass.G4, CircleShape, FluxBlur.Regular, FluxGlassKind.Real),
+                        .floatingChromeSurface(CircleShape),
                 )
             }
             Box(
                 Modifier
                     .align(Alignment.Center)
-                    .size(28.dp)
+                    .size(24.dp)
                     .graphicsLayer { rotationZ = rotation.value },
             ) {
                 FluxIcon(
                     FluxIcons.Plus, null,
                     Modifier.graphicsLayer { alpha = 1f - sel.value.coerceIn(0f, 1f) },
-                    size = 28.dp, tint = c.onAccent,
+                    size = 24.dp, tint = c.onAccent,
                 )
                 FluxIcon(
                     FluxIcons.Plus, null,
                     Modifier.graphicsLayer { alpha = sel.value.coerceIn(0f, 1f) },
-                    size = 28.dp, tint = c.ink,
+                    size = 24.dp, tint = c.ink,
                 )
             }
         }

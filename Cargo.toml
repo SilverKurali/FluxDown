@@ -40,9 +40,10 @@ unwrap_used = "deny"
 wildcard_imports = "deny"
 
 [patch.crates-io]
-# zerx-lab/rqbit = lingdiansr/rqbit (MSE) + Android HTTPS 修复（bundled webpki 根替代需 JNI 初始化的
-# rustls-platform-verifier，否则 Android 上任何 https tracker 都会 panic 掉磁力解析）+ tracker panic 隔离。
-librqbit = { git = "https://github.com/zerx-lab/rqbit", rev = "d9e79c939f223679612cd0b06bd00ed49bd2eff8" }
+# zerx-lab/rqbit main = 上游 ikatson/rqbit main（v9.0.1 之后）+ lingdiansr MSE
+# + Android HTTPS 修复（bundled webpki 根替代需 JNI 初始化的 rustls-platform-verifier，否则 Android 上任何
+# https tracker 都会 panic 掉磁力解析）+ tracker panic 隔离 + 握手超时下发到 Live 种子的 peer 连接。
+librqbit = { git = "https://github.com/zerx-lab/rqbit", rev = "00374a6d772d4123f079f5adf6a1fe013e363381" }
 # 上游 0.7.0 在 iOS 上编译失败（Apple 平台只放行 macOS 的按索引绑定），补丁见源码内 `FluxDown 补丁` 注释；
 # 上游修复发布后删除本条与 third_party/ 副本。
 librqbit-dualstack-sockets = { path = "third_party/librqbit-dualstack-sockets" }

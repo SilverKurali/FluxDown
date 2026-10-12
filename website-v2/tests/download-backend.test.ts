@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { DownloadLookupCache } from "../src/lib/download-cache";
 import { createOssProbe } from "../src/lib/download-probe";
+import worker from "../cdn/oss-proxy.js";
 import {
   DownloadLookupError, downloadSource, latestWithAsset, matchesAssetSize,
   mayProbeOss, ossUnavailable, downloadRedirect, transientGitHubStatus, isGitHubDownloadUrl,
@@ -15,6 +16,7 @@ describe("download policy", () => {
     expect(downloadSource("unknown")).toBe("legacy");
     expect(downloadSource("oss")).toBe("oss");
     expect(downloadSource("github")).toBe("github");
+    expect(downloadSource("auto")).toBe("auto");
     for (const stale of [false, true]) {
       expect(mayProbeOss("github", true, stale)).toBe(false);
     }
@@ -22,6 +24,8 @@ describe("download policy", () => {
     expect(mayProbeOss("oss", false, false)).toBe(false);
     expect(mayProbeOss("oss", true, true)).toBe(false);
     expect(mayProbeOss("legacy", true, true)).toBe(false);
+    expect(mayProbeOss("auto", true, false)).toBe(true);
+    expect(mayProbeOss("auto", true, true)).toBe(false);
     const unavailable = ossUnavailable();
     expect(unavailable.status).toBe(503);
     expect(unavailable.headers.has("Location")).toBe(false);
@@ -160,5 +164,161 @@ describe("OSS HEAD cache", () => {
     expect(calls).toBe(1);
     const failed = createOssProbe(() => { throw new Error("signing failed"); });
     expect(await failed("a", 12)).toBe(false);
+  });
+});
+
+describe("CDN Worker download consumer", () => {
+  const env = {
+    OSS_ACCESS_KEY_ID: "test-id", OSS_ACCESS_KEY_SECRET: "test-secret",
+    OSS_BUCKET: "test-bucket", OSS_ENDPOINT: "oss.example",
+    OSS_RELEASE_PREFIX: "releases", GITHUB_REPO: "owner/repo",
+  };
+  const request = (path = "v1.2.3/app/App%20ARM.zip", query = "fallback=github&tag=v1.2.3", init?: RequestInit) =>
+    new Request(`https://cdn.example/releases/${path}?${query}`, init);
+
+  async function withOrigin(origin: typeof fetch, run: () => Promise<void>) {
+    const previous = globalThis.fetch;
+    globalThis.fetch = origin;
+    try { await run(); } finally { globalThis.fetch = previous; }
+  }
+
+  test("cache hits stream bytes; Range and conditional Range reach a stable private origin URL", async () => {
+    const origins: string[] = [];
+    await withOrigin((async (input, init) => {
+      origins.push(String(input));
+      expect(init?.method).toBe("GET");
+      expect(init?.redirect).toBe("manual");
+      expect(new Headers(init?.headers).get("range")).toBe("bytes=0-2");
+      expect(new Headers(init?.headers).get("if-range")).toBe('"asset"');
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      expect((init as RequestInit & { cf: { cacheTtlByStatus: Record<string, number> } })
+        .cf.cacheTtlByStatus["300-599"]).toBe(-1);
+      return new Response("zip", { status: 206, headers: {
+        "content-length": "3", "content-range": "bytes 0-2/12", "cf-cache-status": "HIT",
+      } });
+    }) as typeof fetch, async () => {
+      for (const query of ["fallback=github&tag=v1.2.3", ""]) {
+        const response = await worker.fetch(request(undefined, query, {
+          headers: { range: "bytes=0-2", "if-range": '"asset"' },
+        }), env);
+        expect(response.status).toBe(206);
+        expect(await response.text()).toBe("zip");
+        expect(response.headers.get("x-edge-cache")).toBe("HIT");
+        expect(response.headers.get("content-range")).toBe("bytes 0-2/12");
+        expect(response.headers.has("location")).toBe(false);
+        expect(response.headers.get("cache-control")).toContain("immutable");
+      }
+      expect(origins[0]).toBe(origins[1]);
+      expect(new URL(origins[0]).searchParams.has("Signature")).toBe(true);
+    });
+  });
+
+  test("APK is fetched from its .bin storage key but served under the original name and type", async () => {
+    const origins: string[] = [];
+    await withOrigin((async (input) => {
+      origins.push(String(input));
+      return new Response("apk", { status: 200, headers: {
+        "content-type": "application/octet-stream",
+        "content-disposition": 'attachment; filename="App.apk.bin"',
+      } });
+    }) as typeof fetch, async () => {
+      const response = await worker.fetch(request("v1.2.3/app/App-arm64.apk"), env);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("apk");
+      expect(response.headers.get("content-type")).toBe("application/vnd.android.package-archive");
+      expect(response.headers.get("content-disposition")).toBe(
+        `attachment; filename="App-arm64.apk"; filename*=UTF-8''App-arm64.apk`,
+      );
+      const zip = await worker.fetch(request(), env);
+      expect(zip.headers.get("content-type")).toBe("application/octet-stream");
+    });
+    expect(new URL(origins[0]).pathname).toBe("/releases/v1.2.3/app/App-arm64.apk.bin");
+    expect(new URL(origins[1]).pathname).toBe("/releases/v1.2.3/app/App%20ARM.zip");
+  });
+
+  for (const status of [301, 403, 404, 429, 500, 502]) {
+    test(`HTTP ${status} cancels OSS body and redirects exact GitHub asset without caching`, async () => {
+      let cancelled = false;
+      await withOrigin((async () => new Response(new ReadableStream({
+        cancel() { cancelled = true; },
+      }), { status, headers: { location: "https://private.example/?Signature=secret" } })) as typeof fetch,
+      async () => {
+        const response = await worker.fetch(request(), env);
+        expect(response.status).toBe(302);
+        expect(response.headers.get("location")).toBe(
+          "https://github.com/owner/repo/releases/download/v1.2.3/App%20ARM.zip",
+        );
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        expect(await response.text()).toBe("");
+        expect(cancelled).toBe(true);
+      });
+    });
+  }
+
+  test("network failure maps unified and historical component tags exactly", async () => {
+    await withOrigin((async () => { throw new TypeError("offline"); }) as typeof fetch, async () => {
+      for (const [component, tag] of [
+        ["app", "v1.2.3-rc.1"], ["app", "app-v1.2.3-rc.1"],
+        ["extension", "extension-v1.2.3-rc.1"], ["server", "server-v1.2.3-rc.1"],
+        ["cli", "cli-v1.2.3-rc.1"], ["mobile", "mobile-v1.2.3-rc.1"],
+      ]) {
+        const response = await worker.fetch(request(`v1.2.3-rc.1/${component}/file.zip`,
+          `fallback=github&tag=${tag}`), env);
+        expect(response.status).toBe(302);
+        expect(response.headers.get("location")).toBe(
+          `https://github.com/owner/repo/releases/download/${tag}/file.zip`,
+        );
+        expect(response.headers.get("cache-control")).toBe("no-store");
+      }
+      const legacy = await worker.fetch(request(undefined, ""), env);
+      expect(legacy.status).toBe(502);
+      expect(legacy.headers.has("location")).toBe(false);
+    });
+  });
+
+  test("416 is not a source failure and HEAD releases upstream bodies", async () => {
+    let cancelled = 0;
+    let status = 416;
+    await withOrigin((async () => new Response(new ReadableStream({
+      cancel() { cancelled++; },
+    }), { status, headers: { "content-range": "bytes */12", "content-length": "12" } })) as typeof fetch,
+    async () => {
+      const invalidRange = await worker.fetch(request(undefined, undefined, {
+        headers: { range: "bytes=99-" },
+      }), env);
+      expect(invalidRange.status).toBe(416);
+      expect(invalidRange.headers.get("content-range")).toBe("bytes */12");
+      expect(invalidRange.headers.get("cache-control")).toBe("no-store");
+      expect(invalidRange.headers.has("location")).toBe(false);
+      status = 200;
+      const head = await worker.fetch(request(undefined, undefined, { method: "HEAD" }), env);
+      expect(head.status).toBe(200);
+      expect(head.headers.get("content-length")).toBe("12");
+      expect(await head.text()).toBe("");
+      expect(cancelled).toBe(2);
+    });
+  });
+
+  test("invalid paths, mismatched tags and external fallback targets never reach OSS or redirect", async () => {
+    let calls = 0;
+    await withOrigin((async () => { calls++; return new Response(null, { status: 404 }); }) as typeof fetch,
+    async () => {
+      for (const [path, query] of [
+        ["v1.2.3/app/file.zip", "fallback=github&tag=extension-v1.2.3"],
+        ["v1.2.3/extension/file.zip", "fallback=github&tag=v1.2.3"],
+        ["v1.2.3/app/file.zip", "fallback=github&tag=v9.9.9"],
+        ["v1.2.3/app/file.zip", "fallback=https://evil.example&tag=v1.2.3"],
+        ["v1.2.3/app/file.zip", "fallback=github&tag=https://evil.example"],
+        ["other/file.zip", ""], ["v1.2.3/app/sub/file.zip", ""],
+        ["v1.2.3/app/file%5C.zip", ""], ["v1.2.3/app/file%00.zip", ""],
+        ["v1.2.3/app/%ZZ", ""],
+      ]) {
+        const response = await worker.fetch(request(path, query), env);
+        expect([400, 404]).toContain(response.status);
+        expect(response.headers.has("location")).toBe(false);
+      }
+      expect((await worker.fetch(request(undefined, undefined, { method: "POST" }), env)).status).toBe(405);
+      expect(calls).toBe(0);
+    });
   });
 });

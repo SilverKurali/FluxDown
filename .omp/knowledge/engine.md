@@ -67,6 +67,15 @@
   占用但 bind 返回 `WSAEACCES` 10013），导致**所有** BT 任务永久 status=4 而
   用户无从自救。**anyhow 错误一律用 `{e:#}` 打印**——`{e}` 只输出最外层
   context，会把这类根因整个吞掉。
+- **BT peer 上限 `BT_PEER_LIMIT` = 512**：librqbit 的 `peer_limit` 信号量同时计
+  「连接中」与「已连接」，出站拨号从开始就占许可，许可满时入站连接被直接丢弃。
+  上游默认 128 在公网 swarm 里会被不可达 peer 的连接尝试占满（#825 实测约 120/128，
+  可用 peer 仅 5–10）；连接中数量由 `connect_rate` × 超时另行约束。下调前先实测。
+- **uTP（`bt_enable_utp`，默认开）**：开启时监听模式为 `TcpAndUtp`，出站并发拨 TCP + uTP；
+  #825 实测在上限 512 基础上稳态再翻倍，代价是 UDP 收发的系统态 CPU 明显更高（上游仍标为
+  experimental）。改动经 daemon 重建共享会话生效。librqbit 来自 `zerx-lab/rqbit` 的 `main`
+  （上游 main + MSE + Android HTTPS + 握手超时下发修复），升级上游时先在该 fork 的 main
+  合并上游，再改根 `Cargo.toml` 的 rev。
 - **BT 会话保活与完成校验**：`maybe_release_bt_session` 在存在「已暂停的未完成
   torrent（句柄在册）」时**不拆**共享会话——resume 走 `unpause`（Paused→Live
   零校验秒恢复）；全部 BT 任务终态化（完成/删除且无做种）才释放。暂停撞上

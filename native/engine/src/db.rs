@@ -2750,6 +2750,7 @@ impl Db {
             ("bt_enabled", "true"),
             ("bt_enable_dht", "true"),
             ("bt_enable_upnp", "true"),
+            ("bt_enable_utp", "true"),
             ("bt_port_start", "6881"),
             ("bt_port_end", "6891"),
             // MSE 三态逃生开关（disabled/enabled/forced），无 UI，经 config API/CLI 可设。

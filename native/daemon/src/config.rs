@@ -210,6 +210,10 @@ pub fn bt_config_from_map(
             .get("bt_enable_upnp")
             .map(|value| value == "true")
             .unwrap_or(true),
+        enable_utp: cfg
+            .get("bt_enable_utp")
+            .map(|value| value == "true")
+            .unwrap_or(true),
         port_start: cfg
             .get("bt_port_start")
             .and_then(|value| value.parse::<u16>().ok())

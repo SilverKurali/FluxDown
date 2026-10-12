@@ -105,9 +105,6 @@ import java.util.Date
 /** 推入页头占位高度：上 6 + 钮 44 + 下 10。 */
 private val PageHeadHeight = 60.dp
 
-/** 选择坞占位：坞高 64 + 上下气隙。 */
-private val SelectionDockClearance = 88.dp
-
 /**
  * R2 条目流（订阅页点按订阅行进入）：某订阅已抓取的条目；搜索、按发布时间排序、选择模式（批量下载 / 忽略）、
  * 条目状态与关联任务状态联动（`HostState.tasks` 按 `taskId`，不另行轮询）。
@@ -214,7 +211,7 @@ fun RssItemsScreen(sourceId: String) {
                     .then(if (swipe != null) Modifier.nestedScroll(swipe.nestedScrollConnection) else Modifier),
                 contentPadding = PaddingValues(
                     top = statusTop + PageHeadHeight + 4.dp,
-                    bottom = navBottom + FluxTheme.space.pageClearance + if (model.selecting) SelectionDockClearance else 0.dp,
+                    bottom = navBottom + if (model.selecting) FluxTheme.space.dockClearance else FluxTheme.space.pageClearance,
                 ),
             ) {
                 item(key = "header") {
@@ -320,7 +317,7 @@ fun RssItemsScreen(sourceId: String) {
                 visible = model.selecting,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(start = margin, end = margin, bottom = navBottom + 12.dp),
+                    .padding(start = margin, end = margin, bottom = navBottom + 8.dp),
                 reservedEnd = 0.dp,
                 selectAllLabel = str(R.string.rssSelectVisible),
                 deselectAllLabel = str(R.string.rssClearSelection),
@@ -497,12 +494,12 @@ private fun RssItemRow(
     val openMenu = { overlays.showMenu(rectBox.rect, menu, header = item.title) }
 
     val startActions = if (canAct && !selecting) {
-        listOf(FluxSwipeAction(downloadLabel, FluxIcons.Download, FluxSwipeTone.Accent, onDownload))
+        listOf(FluxSwipeAction(downloadLabel, FluxIcons.Download, FluxSwipeTone.Accent, onClick = onDownload))
     } else {
         emptyList()
     }
     val endActions = if (canAct && !selecting && ignorable) {
-        listOf(FluxSwipeAction(str(R.string.rssActionIgnore), FluxIcons.EyeOff, FluxSwipeTone.Warn, onIgnore))
+        listOf(FluxSwipeAction(str(R.string.rssActionIgnore), FluxIcons.EyeOff, FluxSwipeTone.Warn, onClick = onIgnore))
     } else {
         emptyList()
     }

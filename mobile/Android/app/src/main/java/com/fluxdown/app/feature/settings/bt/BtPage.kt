@@ -85,6 +85,7 @@ private fun titleOf(row: BtSettingsRow): Int = when (row) {
     BtSettingsRow.Enabled -> R.string.btEnabled
     BtSettingsRow.Dht -> R.string.btEnableDht
     BtSettingsRow.Upnp -> R.string.btEnableUpnp
+    BtSettingsRow.Utp -> R.string.btEnableUtp
     BtSettingsRow.PortStart -> R.string.btListenPortStart
     BtSettingsRow.PortEnd -> R.string.btListenPortEnd
     BtSettingsRow.MseMode -> R.string.btMseMode
@@ -109,6 +110,7 @@ private fun detailOf(row: BtSettingsRow): Int? = when (row) {
     BtSettingsRow.Enabled -> R.string.btEnabledDesc
     BtSettingsRow.Dht -> R.string.btEnableDhtDesc
     BtSettingsRow.Upnp -> R.string.btEnableUpnpDesc
+    BtSettingsRow.Utp -> R.string.btEnableUtpDesc
     BtSettingsRow.PortStart -> R.string.btListenPortDesc
     BtSettingsRow.MseMode -> R.string.btMseModeDesc
     BtSettingsRow.CustomTrackers -> R.string.btTrackerListDesc
@@ -239,6 +241,9 @@ private fun GeneralSection(ctx: SettingsCtx) {
         }
         if (BtSettingsRow.Upnp.isVisible(form)) {
             settingSwitch(ctx, BtSettingsRow.Upnp.configKey, R.string.btEnableUpnp, R.string.btEnableUpnpDesc, id = BtSettingsRow.Upnp.id)
+        }
+        if (BtSettingsRow.Utp.isVisible(form)) {
+            settingSwitch(ctx, BtSettingsRow.Utp.configKey, R.string.btEnableUtp, R.string.btEnableUtpDesc, id = BtSettingsRow.Utp.id)
         }
         if (BtSettingsRow.PortStart.isVisible(form)) {
             settingNumber(

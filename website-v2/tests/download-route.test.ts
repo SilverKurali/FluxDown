@@ -2,10 +2,13 @@ import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import { bustApiCaches } from "../src/lib/api-cache";
 
 let configured = true;
+let cdnConfigured = false;
 const signatures: string[] = [];
 mock.module("astro:env/server", () => ({ GITHUB_TOKEN: "", GITHUB_REPO: "owner/repo" }));
 const ossMock = () => ({
   ossConfigured: configured,
+  cdnDownloadUrl: (key: string, tag: string) => cdnConfigured
+    ? `https://cdn.example/${key}?fallback=github&tag=${encodeURIComponent(tag)}` : null,
   releaseObjectKey: (tag: string, name: string) => `${tag}/${name}`,
   presignOssUrl: (method: string, key: string) => {
     signatures.push(method);
@@ -29,6 +32,7 @@ let sequence = 0;
 beforeEach(() => {
   bustApiCaches();
   configured = true;
+  cdnConfigured = false;
   mock.module("../src/lib/oss", ossMock);
   draft = false;
   prerelease = false;
@@ -64,6 +68,42 @@ test("github never signs or probes OSS", async () => {
   expect(response.headers.get("X-Download-Source")).toBe("github");
   expect(signatures).toEqual([]);
   expect(requests.length).toBe(1);
+});
+
+test("auto uses CDN without HEAD or signing even when website OSS credentials are absent", async () => {
+  cdnConfigured = true;
+  configured = false;
+  mock.module("../src/lib/oss", ossMock);
+  headSize = "0";
+  const response = await get("auto");
+  expect(response.status).toBe(302);
+  expect(response.headers.get("X-Download-Source")).toBe("cdn");
+  expect(response.headers.get("Location")).toBe(
+    `https://cdn.example/v${sequence}/app.zip?fallback=github&tag=v${sequence}`,
+  );
+  expect(signatures).toEqual([]);
+  expect(requests.length).toBe(1);
+});
+
+test("auto without CDN retains verified OSS then GitHub fallback", async () => {
+  expect((await get("auto")).headers.get("X-Download-Source")).toBe("oss");
+  expect(signatures).toEqual(["HEAD", "GET"]);
+  sequence++;
+  headSize = "11";
+  expect((await get("auto")).headers.get("X-Download-Source")).toBe("github");
+});
+
+test("auto CDN still requires published exact GitHub metadata", async () => {
+  cdnConfigured = true;
+  draft = true;
+  expect((await get("auto")).status).toBe(403);
+  bustApiCaches();
+  draft = false;
+  expect((await get("auto", `v${sequence}`, "unknown.zip")).status).toBe(404);
+  bustApiCaches();
+  status = 503;
+  expect((await get("auto")).status).toBe(503);
+  expect(signatures).toEqual([]);
 });
 
 test("legacy prefers verified OSS and forced OSS also works", async () => {
@@ -108,11 +148,13 @@ test("stale metadata only redirects to GitHub; webhook invalidation removes fall
   try {
     expect((await get("github")).status).toBe(302);
     now += 120_001;
+    cdnConfigured = true;
     status = 503;
     const fallback = await get();
     expect(fallback.status).toBe(302);
     expect(fallback.headers.get("X-Download-Source")).toBe("github");
     expect(fallback.headers.get("X-Download-Metadata")).toBe("stale");
+    expect((await get("auto")).headers.get("X-Download-Source")).toBe("github");
     expect((await get("oss")).status).toBe(503);
     expect(signatures).toEqual([]);
     bustApiCaches();

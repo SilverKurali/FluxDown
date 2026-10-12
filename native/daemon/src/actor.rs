@@ -1773,6 +1773,7 @@ async fn apply_live_config<'a>(
                 "bt_enabled"
                     | "bt_enable_dht"
                     | "bt_enable_upnp"
+                    | "bt_enable_utp"
                     | "bt_port_start"
                     | "bt_port_end"
                     | "bt_custom_trackers"

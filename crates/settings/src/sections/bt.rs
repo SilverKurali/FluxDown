@@ -59,6 +59,11 @@ fn basic_section(ctx: &SectionContext, bt_enabled: bool) -> SettingsSection {
             ctx.daemon_switch("bt_enable_upnp"),
         ))
         .row(ctx.item(
+            "btEnableUtp",
+            Some("btEnableUtpDesc"),
+            ctx.daemon_switch("bt_enable_utp"),
+        ))
+        .row(ctx.item(
             "btListenPortStart",
             Some("btListenPortDesc"),
             ctx.daemon_number("bt_port_start"),

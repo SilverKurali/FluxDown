@@ -140,7 +140,7 @@ private data class SelectionCaps(val canResume: Boolean, val canPause: Boolean) 
  */
 @Composable
 fun DownloadsSelectionDock(modifier: Modifier) {
-    SelectionDockContent(modifier, reservedEnd = 76.dp)
+    SelectionDockContent(modifier, reservedEnd = FluxTheme.space.dockHeight + 12.dp)
 }
 
 /** expanded 档：由列表栏自己浮在底部居中（壳层在该档不放坞与球）。 */

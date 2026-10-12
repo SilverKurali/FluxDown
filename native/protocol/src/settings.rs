@@ -116,6 +116,7 @@ pub const SYNC_SETTING_SPECS: &[SettingSpec] = &[
     spec!("bt.enabled", Daemon, "bt_enabled"),
     spec!("bt.enable_dht", Daemon, "bt_enable_dht"),
     spec!("bt.enable_upnp", Daemon, "bt_enable_upnp"),
+    spec!("bt.enable_utp", Daemon, "bt_enable_utp"),
     spec!("bt.custom_trackers", Daemon, "bt_custom_trackers"),
     spec!("bt.tracker_sub_enabled", Daemon, "bt_tracker_sub_enabled"),
     spec!("bt.tracker_sub_urls", Daemon, "bt_tracker_sub_urls"),
@@ -381,6 +382,7 @@ fn boolean_key(key: &str) -> bool {
             | "bt.enabled"
             | "bt.enable_dht"
             | "bt.enable_upnp"
+            | "bt.enable_utp"
             | "bt.tracker_sub_enabled"
             | "ed2k.enable_kad"
             | "ed2k.enable_upnp"
@@ -437,14 +439,14 @@ mod tests {
 
     #[test]
     fn catalog_has_exact_unique_flutter_count_and_namespaced_daemon_mapping() {
-        assert_eq!(SYNC_SETTING_SPECS.len(), 59);
+        assert_eq!(SYNC_SETTING_SPECS.len(), 60);
         assert_eq!(
             SYNC_SETTING_SPECS
                 .iter()
                 .map(|spec| spec.key)
                 .collect::<HashSet<_>>()
                 .len(),
-            59
+            60
         );
         let spec = setting_spec("download.max_concurrent_tasks").expect("download spec");
         assert_eq!(spec.owner, SettingOwner::Daemon);

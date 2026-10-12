@@ -136,6 +136,7 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
     field("bt_enabled", DaemonConfigKind::Bool, "true"),
     field("bt_enable_dht", DaemonConfigKind::Bool, "true"),
     field("bt_enable_upnp", DaemonConfigKind::Bool, "true"),
+    field("bt_enable_utp", DaemonConfigKind::Bool, "true"),
     field(
         "bt_port_start",
         DaemonConfigKind::Integer {

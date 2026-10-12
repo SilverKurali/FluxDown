@@ -9,10 +9,13 @@ const asset = {
 };
 
 describe("website download sources", () => {
-  test("default website download goes directly to GitHub without hitting the signing endpoint", () => {
+  test("GitHub backup goes directly to GitHub without hitting the signing endpoint", () => {
     expect(assetDownloadUrl(asset, "github")).toBe(asset.github_download_url);
   });
-  test("backup preserves base, component tag and filename", () => {
+  test("default website download selects automatic CDN fallback and preserves base, component tag and filename", () => {
+    expect(assetDownloadUrl(asset, "auto")).toBe(`${asset.download_url}&source=auto`);
+  });
+  test("explicit OSS links preserve their existing contract", () => {
     expect(assetDownloadUrl(asset, "oss")).toBe(`${asset.download_url}&source=oss`);
   });
   test("old cached API responses explicitly select GitHub, not legacy OSS", () => {
@@ -20,7 +23,7 @@ describe("website download sources", () => {
       .toBe(`${asset.download_url}&source=github`);
   });
   test("source replacement preserves preview tags and does not duplicate parameters", () => {
-    const result = assetDownloadUrl({ ...asset, download_url: "/api/download/a.zip?tag=v1.2.3-rc.1&source=github" }, "oss");
-    expect(result).toBe("/api/download/a.zip?tag=v1.2.3-rc.1&source=oss");
+    const result = assetDownloadUrl({ ...asset, download_url: "/api/download/a.zip?tag=v1.2.3-rc.1&source=github&channel=frontier#asset" }, "auto");
+    expect(result).toBe("/api/download/a.zip?tag=v1.2.3-rc.1&source=auto&channel=frontier#asset");
   });
 });

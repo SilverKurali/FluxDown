@@ -11,11 +11,11 @@ export interface DownloadRelease {
   assets: DownloadAsset[];
 }
 
-export type DownloadSource = "github" | "oss" | "legacy";
+export type DownloadSource = "auto" | "github" | "oss" | "legacy";
 
 // 未知 source 延续旧客户端行为，不改变既有链接语义。
 export function downloadSource(source: string | null): DownloadSource {
-  return source === "github" || source === "oss" ? source : "legacy";
+  return source === "auto" || source === "github" || source === "oss" ? source : "legacy";
 }
 
 export function latestWithAsset(
@@ -68,7 +68,7 @@ export function transientGitHubStatus(status: number, headers: Headers): boolean
       headers.has("retry-after")));
 }
 
-export function downloadRedirect(location: string, source: "github" | "oss", stale = false): Response {
+export function downloadRedirect(location: string, source: "github" | "oss" | "cdn", stale = false): Response {
   return new Response(null, {
     status: 302,
     headers: {
