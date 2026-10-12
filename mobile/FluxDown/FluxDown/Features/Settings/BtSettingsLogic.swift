@@ -24,7 +24,7 @@ nonisolated enum BtSettingsTab: String, CaseIterable, Identifiable {
 /// 做种「时长 + 单位」两个 PC 行在移动端合成一行（各自仍写回两个键）。
 nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
     case enabled
-    case dht, upnp, portStart, portEnd, mseMode
+    case dht, upnp, utp, portStart, portEnd, mseMode
     case customTrackers, trackerSub, trackerSubUrls, trackerSubStatus
     case seedEnabled, seedMaxActive, autoReseed, seedRatio, seedPostRatio
     case seedTimeLimit, seedInactiveTimeLimit, seedOperator, seedThenAction
@@ -33,7 +33,7 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
 
     var tab: BtSettingsTab {
         switch self {
-        case .enabled, .dht, .upnp, .portStart, .portEnd, .mseMode: .general
+        case .enabled, .dht, .upnp, .utp, .portStart, .portEnd, .mseMode: .general
         case .customTrackers, .trackerSub, .trackerSubUrls, .trackerSubStatus: .tracker
         default: .seeding
         }
@@ -44,6 +44,7 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
         case .enabled: "bt_enabled"
         case .dht: "bt_enable_dht"
         case .upnp: "bt_enable_upnp"
+        case .utp: "bt_enable_utp"
         case .portStart: "bt_port_start"
         case .portEnd: "bt_port_end"
         case .mseMode: "bt_mse_mode"
@@ -86,6 +87,7 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
         case .enabled: "btEnabled"
         case .dht: "btEnableDht"
         case .upnp: "btEnableUpnp"
+        case .utp: "btEnableUtp"
         case .portStart: "btListenPortStart"
         case .portEnd: "btListenPortEnd"
         case .mseMode: "btMseMode"
@@ -111,6 +113,7 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
         case .enabled: "btEnabledDesc"
         case .dht: "btEnableDhtDesc"
         case .upnp: "btEnableUpnpDesc"
+        case .utp: "btEnableUtpDesc"
         case .portStart: "btListenPortDesc"
         case .mseMode: "btMseModeDesc"
         case .customTrackers: "btTrackerListDesc"

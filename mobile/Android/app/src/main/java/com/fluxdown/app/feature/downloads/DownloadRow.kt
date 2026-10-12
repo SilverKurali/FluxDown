@@ -168,8 +168,8 @@ internal fun DownloadRow(
     }
     val endActions = remember(text, actions) {
         listOf(
-            FluxSwipeAction(text.copyLink, FluxIcons.Copy, FluxSwipeTone.Neutral) { actions.copyLink(latest.task) },
-            FluxSwipeAction(text.delete, FluxIcons.Trash2, FluxSwipeTone.Danger) { actions.confirmDelete(listOf(latest.task)) },
+            FluxSwipeAction(text.copyLink, FluxIcons.Copy, FluxSwipeTone.Neutral, showLabel = false) { actions.copyLink(latest.task) },
+            FluxSwipeAction(text.delete, FluxIcons.Trash2, FluxSwipeTone.Danger, showLabel = false) { actions.confirmDelete(listOf(latest.task)) },
         )
     }
 

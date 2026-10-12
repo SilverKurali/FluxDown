@@ -254,6 +254,17 @@ const BT_MAX_BLOCKING_THREADS: usize = 64;
 /// 落库周期同量级。
 const DHT_PERSIST_DUMP_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
+/// 单个种子的 peer 并发上限（librqbit `SessionOptions::peer_limit`，上游默认 128）。
+///
+/// librqbit 用同一个信号量同时计「连接中」与「已连接」：出站连接从拨号起就
+/// 占许可，直到连接超时 / 握手失败才释放；许可耗尽时入站连接被直接丢弃。
+/// 公网 swarm 里大部分 peer 不可达，实测（#825，6.9 GB 公开种子）128 的上限
+/// 被约 120 个连接中的尝试占满，只剩 5–10 个可用 peer，队列里上千个 peer
+/// 永远轮不到。连接中的数量另由 `connect_rate`（30/s）× 超时约束在 ~200–300，
+/// 512 让信号量不再成为瓶颈：稳态 1.1 → 12.6 MB/s（交错重复多轮的均值），
+/// RSS 增加约 15 MB。
+const BT_PEER_LIMIT: usize = 512;
+
 /// Well-known public trackers used to accelerate peer discovery for magnet
 /// links that ship without `tr=` parameters.
 ///
@@ -394,6 +405,10 @@ pub struct BtConfig {
     pub enabled: bool,
     pub enable_dht: bool,
     pub enable_upnp: bool,
+    /// Listen and connect over uTP in addition to TCP (`ListenerMode::TcpAndUtp`).
+    /// Many peers (uTorrent / qBittorrent / BitComet) are reachable over uTP
+    /// only from behind NAT; #825 measured ~2× live peers with it on.
+    pub enable_utp: bool,
     pub port_start: u16,
     pub port_end: u16,
     /// User-supplied extra tracker URLs (newline-separated).
@@ -430,6 +445,7 @@ impl Default for BtConfig {
             enabled: true,
             enable_dht: true,
             enable_upnp: true,
+            enable_utp: true,
             port_start: 6881,
             port_end: 6891,
             custom_trackers: String::new(),
@@ -650,6 +666,7 @@ impl SharedBtSession {
 
         let enable_dht = bt_config.enable_dht;
         let enable_upnp = bt_config.enable_upnp;
+        let enable_utp = bt_config.enable_utp;
 
         let save_dir = default_save_dir.to_owned();
         let save_dir_for_cleanup = save_dir.clone();
@@ -686,7 +703,11 @@ impl SharedBtSession {
             // then IPv4-only, preserving the existing port-range contract on
             // occupied ports and hosts without usable IPv6.
             listen: Some(ListenerOptions {
-                mode: ListenerMode::TcpOnly,
+                mode: if enable_utp {
+                    ListenerMode::TcpAndUtp
+                } else {
+                    ListenerMode::TcpOnly
+                },
                 listen_addr: if ipv4_only {
                     SocketAddr::from(([0, 0, 0, 0], port))
                 } else {
@@ -744,6 +765,8 @@ impl SharedBtSession {
                 max_delay: Duration::from_secs(600),
                 total_delay: Some(Duration::from_secs(1800)),
             }),
+            // 连接中与已连接共用此上限，见 `BT_PEER_LIMIT`。
+            peer_limit: Some(BT_PEER_LIMIT),
             ..Default::default()
         };
         let start_session = |dht: bool| -> anyhow::Result<Arc<Session>> {
@@ -887,9 +910,10 @@ impl SharedBtSession {
         }
 
         log_info!(
-            "[BT] shared session created (DHT={}, UPnP={}, ports={}-{}, listen_addr={:?}, mse_mode={:?}, {} trackers, speed_limit={} B/s, upload_limit={} B/s, worker_threads={}, persistence=on)",
+            "[BT] shared session created (DHT={}, UPnP={}, uTP={}, ports={}-{}, listen_addr={:?}, mse_mode={:?}, {} trackers, speed_limit={} B/s, upload_limit={} B/s, worker_threads={}, persistence=on)",
             enable_dht,
             enable_upnp,
+            enable_utp,
             port_start,
             port_end,
             session.listen_addr(),

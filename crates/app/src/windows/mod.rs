@@ -33,6 +33,9 @@ pub mod selection;
 pub mod settings;
 pub mod task_detail;
 
+#[cfg(test)]
+mod tests;
+
 /// 顶层窗口身份：同 key 只允许一个实例。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum WindowKey {
@@ -65,19 +68,7 @@ impl Global for WindowRegistry {}
 impl WindowRegistry {
     /// 安装全局注册表：窗口关闭清理 + 退出判定 + 退出时落盘边界。
     pub fn init(cx: &mut App, client: Arc<AgentClient>) {
-        let closed_sub = cx.on_window_closed(|cx, window_id| {
-            let last_closed = {
-                let registry = cx.global_mut::<Self>();
-                if let Some(key) = registry.ids.remove(&window_id) {
-                    registry.open.remove(&key);
-                }
-                registry.confirming.remove(&window_id);
-                registry.open.is_empty()
-            };
-            if last_closed {
-                crate::lifecycle::quit_ui(cx);
-            }
-        });
+        let closed_sub = cx.on_window_closed(Self::on_window_closed);
         let bounds = Rc::new(RefCell::new(bounds::BoundsMemory::default()));
         let quit_bounds = Rc::clone(&bounds);
         let quit_sub = cx.on_app_quit(move |_| {
@@ -105,6 +96,20 @@ impl WindowRegistry {
         });
     }
 
+    fn on_window_closed(cx: &mut App, window_id: WindowId) {
+        let last_closed = {
+            let registry = cx.global_mut::<Self>();
+            if let Some(key) = registry.ids.remove(&window_id) {
+                registry.open.remove(&key);
+            }
+            registry.confirming.remove(&window_id);
+            registry.open.is_empty()
+        };
+        if last_closed {
+            crate::lifecycle::quit_ui(cx);
+        }
+    }
+
     /// 承载全局提示（配对确认框、登录失效通知）的窗口：当前活动的主 / 设置窗口优先，
     /// 其次主窗口，再次设置窗口；这两类窗口都由 `Root` 托管浮层。
     pub fn overlay_window(cx: &App) -> Option<AnyWindowHandle> {
@@ -117,7 +122,7 @@ impl WindowRegistry {
             .or(settings)
     }
 
-    /// 打开或聚焦窗口。已开 → `activate_window` 并返回 `None`。
+    /// 打开或聚焦窗口。已开 → 延后 `activate_window` 并返回 `None`。
     pub fn open_or_focus<V: Render>(
         cx: &mut App,
         key: WindowKey,
@@ -125,15 +130,14 @@ impl WindowRegistry {
         build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
     ) -> Option<WindowHandle<V>> {
         if let Some(handle) = cx.global::<Self>().open.get(&key).copied() {
-            if handle
-                .update(cx, |_, window, _| window.activate_window())
-                .is_ok()
-            {
-                return None;
-            }
-            let registry = cx.global_mut::<Self>();
-            registry.open.remove(&key);
-            registry.ids.remove(&handle.window_id());
+            // 快捷键可能正在该窗口自己的 update 栈内分发；此时句柄暂不可更新，
+            // 不代表窗口已关闭。退出当前栈后再聚焦，登记只由 on_window_closed 清理。
+            cx.defer(move |cx| {
+                if let Err(error) = handle.update(cx, |_, window, _| window.activate_window()) {
+                    log::debug!("window closed before deferred activation: {error:#}");
+                }
+            });
+            return None;
         }
         let label = format!("{key:?}");
         let opened_at = std::time::Instant::now();

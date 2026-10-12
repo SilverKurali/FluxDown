@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,9 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,7 +38,6 @@ import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.Placeable
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -51,6 +49,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.util.lerp
@@ -59,7 +58,6 @@ import com.fluxdown.fluxui.theme.FluxScaleGroup
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 import kotlinx.coroutines.launch
-import kotlin.math.max
 import kotlin.math.roundToInt
 
 /** 导航坞徽标：计数或红点。 */
@@ -85,25 +83,20 @@ data class FluxDockItem(
     val badgeDescription: String? = null,
 )
 
-private val ItemSize = 52.dp
-private val DockHeight = 64.dp
-private val DockPad = 6.dp
-private val ItemGap = 4.dp
-private val MiniWidth = 64.dp
+private val DockPad = 4.dp
 
 /**
- * 浮动导航坞（01 §12.2）：Real 玻璃 G3（canvasMix .15，比画布更亮）胶囊 + 强发丝线 + 两层向下投影
- * （近处接触影 + 远处环境影，§5.5 浮动 chrome 例外），浮在内容之上有明确的层次；
- * 选中项展开为“图标 + 文字”（accentLo 纯底 + accent 描边、accentHi 图标与文字），
- * 液态指示器两段弹簧（位置 `liquid`、宽度 `fluid`）。
+ * 浮动导航坞：实色胶囊与细边线区分内容层，不依赖投影。
+ * 选中项展开为“图标 + 文字”（accentLo 纯底 + accent 描边、accentHi 图标与文字）。
+ * 各项铺满内宽，指示器沿实际项边界运动。
  *
- * 本组件在父容器内**占满宽度、固定高 64**；坞本体宽 = 容器宽 − [reservedEnd]（球位 64 + 间距 12），
- * 迷你态宽 64。由应用负责摆放（左右 16、距底 26dp 等）。必须位于 `fluxBackdropSource` 之后的兄弟层。
+ * 本组件在父容器内**占满宽度、固定为主题 dockHeight 高**；坞本体宽 = 容器宽 − [reservedEnd]（球位 + 间距 12）。
+ * 迷你态宽高相同。由应用负责摆放，系统导航栏上方留 8dp。
  *
  * - [mini]：应用按滚动方向决定（向下 Δ>5dp 迷你，向上 / 顶部展开）；迷你态点击坞 → [onExpand]，不触发选中。
  * - [hidden]：推入页 / Expanded 隐藏（`alpha 0、translateY 30dp`，退场结束后移出组合）。
  * - [selectionMode]：多选模式，坞淡出（`translateY 18、scale .94`），由 [SelectionDock] 接替。
- * - 选中项宽 = `max(112dp, 52dp + 标签实测宽 + 8dp + 12dp)`；总宽放不下时退化为“全部仅图标”（见 §3.3）。
+ * - 选中项按标签实测宽度展开，其余项均分余宽；无法保留 48dp 点击宽度时全部仅显示图标。
  * - 点击不同项触发 tick 触感；点击当前项同样回调 [onSelect]（应用可据此回顶并展开坞）。
  */
 @Composable
@@ -116,7 +109,7 @@ fun FluxDock(
     onExpand: () -> Unit = {},
     hidden: Boolean = false,
     selectionMode: Boolean = false,
-    reservedEnd: Dp = 76.dp,
+    reservedEnd: Dp = FluxTheme.space.dockHeight + 12.dp,
     contentDescription: String = "主导航",
     expandDescription: String = "展开导航",
 ) {
@@ -124,12 +117,10 @@ fun FluxDock(
     val motion = FluxTheme.motion
     val hideP = rememberChromePresence(!hidden, motion.fluid)
     val selP = rememberChromePresence(!selectionMode, motion.liquid)
-    var availPx by remember { mutableIntStateOf(0) }
-    Box(
+    BoxWithConstraints(
         modifier
             .fillMaxWidth()
-            .height(DockHeight)
-            .onSizeChanged { availPx = it.width },
+            .height(FluxTheme.space.dockHeight),
         contentAlignment = Alignment.CenterStart,
     ) {
         if (hideP.composed && selP.composed) {
@@ -142,7 +133,7 @@ fun FluxDock(
                 interactive = !hidden && !selectionMode,
                 hideP = hideP,
                 selP = selP,
-                availPx = availPx,
+                availPx = constraints.maxWidth,
                 reservedEnd = reservedEnd,
                 groupDescription = contentDescription,
                 expandDescription = expandDescription,
@@ -170,34 +161,31 @@ private fun DockBody(
     val motion = FluxTheme.motion
     val haptics = FluxTheme.haptics
     val density = LocalDensity.current
+    val dockHeight = FluxTheme.space.dockHeight
+    val itemSize = dockHeight - DockPad * 2
+    val itemWidthPx = with(density) { itemSize.roundToPx() }
     val n = items.size
 
-    val labelStyle = remember(type) { type.weight(type.sm, 600).copy(letterSpacing = 0.005.em) }
+    val labelStyle = remember(type) { type.weight(type.sm, 500).copy(letterSpacing = 0.005.em) }
     val measurer = rememberTextMeasurer()
-    val labelWidths = remember(items, labelStyle, density) {
-        items.map {
-            with(density) {
-                measurer.measure(it.label, labelStyle, softWrap = false, maxLines = 1).size.width.toDp().value
-            }
-        }
+    val labelSizes = remember(items, labelStyle, density, measurer) {
+        items.map { measurer.measure(it.label, labelStyle, softWrap = false, maxLines = 1).size }
     }
-    // 选中项宽（dp）：max(112, 52 + 标签 + 8 + 12)；放不下时全部仅图标。
-    val fullSelWidths = remember(labelWidths) { labelWidths.map { max(112f, 52f + it + 8f + 12f) } }
-    val availDp = availPx / density.density - reservedEnd.value
-    val natural = 12f + 56f * (n - 1) + fullSelWidths[selected]
-    val iconOnly = availPx > 0 && natural > availDp
-    val selWidths = remember(fullSelWidths, iconOnly) { if (iconOnly) fullSelWidths.map { 52f } else fullSelWidths }
-
-    val targetLeft = if (mini) 6f else 6f + 56f * selected
-    val targetWidth = if (mini) 52f else selWidths[selected]
-
+    val preferredWidths = remember(labelSizes, density, itemWidthPx) {
+        val contentPadding = with(density) { (20.dp + 8.dp + 24.dp).roundToPx() }
+        IntArray(items.size) { (labelSizes[it].width + contentPadding).coerceAtLeast(itemWidthPx) }
+    }
+    val expandedWidth = with(density) {
+        dockWidth(availPx, reservedEnd.roundToPx(), dockHeight.roundToPx(), 0f)
+    }
+    val expandedInnerWidth = (expandedWidth - with(density) { DockPad.roundToPx() } * 2).coerceAtLeast(0)
+    val iconOnly = !dockLabelFits(expandedInnerWidth, itemWidthPx, preferredWidths, selected, labelSizes[selected].height)
     val miniA = remember { Animatable(if (mini) 1f else 0f) }
     val selA = remember(n) { List(n) { Animatable(if (it == selected) 1f else 0f) } }
-    val indLeft = remember { Animatable(targetLeft) }
-    val indWidth = remember { Animatable(targetWidth) }
-    LaunchedEffect(selected, mini, targetWidth, n) {
-        launch { indLeft.animateTo(targetLeft, motion.of(motion.liquid)) }
-        launch { indWidth.animateTo(targetWidth, motion.of(motion.fluid)) }
+    val geometry = remember(n) { DockGeometry(n) }
+    val selectionWeights = remember(n) { FloatArray(n) }
+    val placeables = remember(n) { arrayOfNulls<Placeable>(n) }
+    LaunchedEffect(selected, mini, n) {
         launch { miniA.animateTo(if (mini) 1f else 0f, motion.of(motion.liquid)) }
         selA.forEachIndexed { i, a -> launch { a.animateTo(if (i == selected) 1f else 0f, motion.of(motion.liquid)) } }
     }
@@ -206,10 +194,8 @@ private fun DockBody(
     Box(
         Modifier
             .layout { measurable, c ->
-                val miniPx = MiniWidth.roundToPx()
-                val expanded = (c.maxWidth - reservedEnd.roundToPx()).coerceAtLeast(miniPx)
-                val w = lerp(expanded.toFloat(), miniPx.toFloat(), miniA.value.coerceIn(0f, 1f)).roundToInt()
-                val p = measurable.measure(Constraints.fixed(w, DockHeight.roundToPx()))
+                val w = dockWidth(c.maxWidth, reservedEnd.roundToPx(), dockHeight.roundToPx(), miniA.value)
+                val p = measurable.measure(Constraints.fixed(w, dockHeight.roundToPx()))
                 layout(p.width, p.height) { p.place(0, 0) }
             }
             .chromeFade(translateY = 30.dp) { hideP.progress.value }
@@ -231,7 +217,9 @@ private fun DockBody(
                         sel = selA[i],
                         mini = miniA,
                         labelStyle = labelStyle,
-                        showLabel = !iconOnly,
+                        showLabel = !iconOnly && dockLabelFits(
+                            expandedInnerWidth, itemWidthPx, preferredWidths, i, labelSizes[i].height,
+                        ),
                         enabled = interactive && !mini,
                         onClick = {
                             if (i != selected) haptics.tick()
@@ -242,28 +230,29 @@ private fun DockBody(
             },
             modifier = Modifier.fillMaxSize(),
         ) { measurables, constraints ->
-            val itemH = ItemSize.roundToPx()
+            val itemH = itemSize.roundToPx()
             val top = DockPad.roundToPx()
-            val gap = ItemGap.roundToPx()
-            val m = miniA.value.coerceIn(0f, 1f)
-            val indPlaceable = measurables[0].measure(
-                Constraints.fixed(indWidth.value.dp.roundToPx().coerceAtLeast(0), itemH),
+            for (i in items.indices) selectionWeights[i] = selA[i].value
+            geometry.update(
+                innerWidth = (constraints.maxWidth - top * 2).coerceAtLeast(0),
+                expandedInnerWidth = expandedInnerWidth,
+                minimumItemWidth = itemH,
+                preferredWidths = preferredWidths,
+                selection = selectionWeights,
+                selected = selected,
+                iconOnly = iconOnly,
+                mini = miniA.value,
             )
-            val xs = IntArray(n)
-            val placeables = arrayOfNulls<Placeable>(n)
-            var cursor = DockPad.roundToPx()
-            for (i in 0 until n) {
-                val s = selA[i].value.coerceIn(0f, 1f)
-                val base = lerp(52f, selWidths[i], s)
-                val w = lerp(base, 52f * s, m).dp.roundToPx().coerceAtLeast(0)
-                val x = (if (i == 0) cursor else cursor + gap) - (ItemGap.toPx() * m * (1f - s)).roundToInt()
-                placeables[i] = measurables[i + 1].measure(Constraints.fixed(w, itemH))
-                xs[i] = x
-                cursor = x + w
+            val indPlaceable = measurables[0].measure(
+                Constraints.fixed(geometry.indicatorWidth, itemH),
+            )
+            for (i in items.indices) {
+                placeables[i] = measurables[i + 1].measure(Constraints.fixed(geometry.widths[i], itemH))
             }
+            val rtl = layoutDirection == LayoutDirection.Rtl
             layout(constraints.maxWidth, constraints.maxHeight) {
-                indPlaceable.place(indLeft.value.dp.roundToPx(), top)
-                for (i in 0 until n) placeables[i]?.place(xs[i], top)
+                indPlaceable.place(top + geometry.indicatorLeft(rtl), top)
+                for (i in items.indices) placeables[i]?.place(top + geometry.left(i, rtl), top)
             }
         }
         if (mini) {
@@ -273,7 +262,7 @@ private fun DockBody(
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
-                        onClickLabel = expandDescription,
+                        enabled = interactive,
                         role = Role.Button,
                         onClick = onExpand,
                     ),
@@ -286,7 +275,7 @@ private fun DockBody(
 @Composable
 private fun DockIndicator() {
     val c = FluxTheme.colors
-    val shape = RoundedCornerShape(26.dp)
+    val shape = CircleShape
     Box(
         Modifier
             .drawWithCache {
@@ -318,7 +307,7 @@ private fun DockItemView(
     val description = item.badgeDescription?.let { "${item.label}，$it" } ?: item.label
     Box(
         Modifier
-            .clip(RoundedCornerShape(26.dp))
+            .clip(CircleShape)
             .selectable(
                 selected = isSelected,
                 interactionSource = interaction,
@@ -336,7 +325,7 @@ private fun DockItemView(
                 .clearAndSetSemantics { },
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.size(22.dp)) {
+            Box(Modifier.size(20.dp)) {
                 FluxIcon(
                     item.icon, null,
                     Modifier.graphicsLayer { alpha = 1f - sel.value.coerceIn(0f, 1f) },
@@ -357,7 +346,7 @@ private fun DockItemView(
                             val f = (sel.value * (1f - mini.value)).coerceIn(0f, 1f)
                             val gap = 8.dp.roundToPx()
                             val w = ((p.width + gap) * f).roundToInt()
-                            layout(w, p.height) { p.place((gap * f).roundToInt(), 0) }
+                            layout(w, p.height) { p.placeRelative((gap * f).roundToInt(), 0) }
                         }
                         .graphicsLayer { alpha = (sel.value * (1f - mini.value)).coerceIn(0f, 1f) },
                     style = labelStyle,

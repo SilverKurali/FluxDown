@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
@@ -174,7 +175,11 @@ fun DownloadsScreen(expanded: Boolean) {
                     Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .padding(start = 16.dp, end = 16.dp, bottom = 22.dp),
+                        .padding(
+                            start = 16.dp,
+                            end = 16.dp,
+                            bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp,
+                        ),
                     contentAlignment = Alignment.BottomCenter,
                 ) { ExpandedSelectionDock() }
             }
@@ -287,7 +292,12 @@ private fun DownloadsListBody(
     val swipe = LocalSwipeRevealCoordinator.current
     val density = LocalDensity.current
     val margin = FluxTheme.space.screenMargin
-    val clearance = if (expanded) FluxTheme.space.pageClearance else FluxTheme.space.dockClearance
+    val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val clearance = bottomInset + if (expanded && !nav.selecting) {
+        FluxTheme.space.pageClearance
+    } else {
+        FluxTheme.space.dockClearance
+    }
     val list = view.list
     val prefs = view.prefs
     val style = remember(prefs?.density, prefs?.fields) { prefs?.let { RowStyle(it.density, it.fields) } }

@@ -82,6 +82,7 @@ export const SYNC_GROUPS: readonly SyncGroup[] = [
       'bt.enabled',
       'bt.enable_dht',
       'bt.enable_upnp',
+      'bt.enable_utp',
       'bt.custom_trackers',
       'bt.tracker_sub_enabled',
       'bt.tracker_sub_urls',

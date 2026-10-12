@@ -1,13 +1,13 @@
 /**
  * Release 下载入口（仅 302，不代理文件流量）。
- * source=github：仅 GitHub；source=oss：仅已验证 OSS，不可用返回 503；
+ * source=auto：CDN 缓存优先、未命中 OSS 回源、失败 GitHub；无 CDN 时验证 OSS 后直连。
+ * source=github：仅 GitHub；source=oss：仅已验证 OSS，不可用返回 503。
  * 无 source / 未知 source：保留旧客户端 OSS 优先、GitHub 兜底行为。
- * 官网 GitHub 默认策略由调用方显式传 source=github，不能改变旧客户端默认值。
  */
 import type { APIRoute } from "astro";
 import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 import { getCached, setCached } from "@/lib/api-cache";
-import { ossConfigured, ossDownloadUrl, presignOssUrl, releaseObjectKey } from "@/lib/oss";
+import { cdnDownloadUrl, ossConfigured, ossDownloadUrl, presignOssUrl, releaseObjectKey } from "@/lib/oss";
 import { DownloadLookupCache } from "@/lib/download-cache";
 import { createOssProbe } from "@/lib/download-probe";
 import {
@@ -121,13 +121,19 @@ export const GET: APIRoute = async ({ params, url }) => {
 
     // 只有 GitHub 新鲜元数据确认的 tag + asset 才有资格获得 OSS 签名。
     // 过期缓存只允许 GitHub 公共 URL：撤回/转草稿后由 GitHub 自身拒绝访问。
+    if (source === "auto" && !stale) {
+      const cdn = cdnDownloadUrl(releaseObjectKey(release.tag_name, asset.name), release.tag_name);
+      // 不先 HEAD OSS：即使源站离线，边缘仍可能持有完整缓存。
+      if (cdn) return downloadRedirect(cdn, "cdn");
+    }
     if (mayProbeOss(source, ossConfigured, stale)) {
       const key = releaseObjectKey(release.tag_name, asset.name);
       if (await ossHasAsset(key, asset.size)) {
         try {
-          return downloadRedirect(ossDownloadUrl(key), "oss");
+          const target = ossDownloadUrl(key);
+          if (target) return downloadRedirect(target, "oss");
         } catch {
-          // 签名失败同样遵循强制 OSS 的 503 / 旧客户端的 GitHub 兜底策略。
+          // 签名失败同样遵循强制 OSS 的 503 / auto 与旧客户端的 GitHub 兜底策略。
         }
       }
     }

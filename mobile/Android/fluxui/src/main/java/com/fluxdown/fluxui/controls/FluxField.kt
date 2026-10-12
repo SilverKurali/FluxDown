@@ -260,7 +260,7 @@ fun FluxField(
     }
 }
 
-/** 字段尾部的 32dp 圆形小按钮（清除 / 显隐密码 / 粘贴），命中区 40dp（不撑高 44dp 字段框），按压 `scale .9`。 */
+/** 字段尾部的 32dp 小按钮（清除 / 显隐密码 / 粘贴），独立命中区 48dp，按压 `scale .9`。 */
 @Composable
 fun FluxFieldAction(
     icon: ImageVector,
@@ -271,7 +271,7 @@ fun FluxFieldAction(
     val c = FluxTheme.colors
     Box(
         modifier
-            .size(40.dp)
+            .size(48.dp)
             .fluxPressable(onClick = onClick, scale = 0.9f, role = Role.Button)
             .semantics { this.contentDescription = contentDescription },
         contentAlignment = Alignment.Center,

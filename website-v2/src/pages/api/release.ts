@@ -272,7 +272,7 @@ export const GET: APIRoute = async ({ url }) => {
         name: asset.name,
         size: asset.size,
         github_download_url: asset.browser_download_url,
-        // 保留旧客户端的下载契约；官网使用 GitHub 直链，备用源显式指定 source。
+        // 保留旧客户端下载契约；官网显式 source=auto，备用入口使用 GitHub 直链。
         // 资产不在最新客户端 release 中时（如独立扩展 release）带 tag 定位
         download_url: tag
           ? withBase(`/api/download/${asset.name}?tag=${encodeURIComponent(tag)}`)

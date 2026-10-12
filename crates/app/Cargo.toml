@@ -45,6 +45,9 @@ log = "0.4"
 fluxdown_logfile = { version = "0.1.0", path = "../../native/logfile" }
 base64 = "0.22"
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
 [target.'cfg(windows)'.build-dependencies]
 winresource.workspace = true
 

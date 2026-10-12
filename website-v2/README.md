@@ -13,6 +13,15 @@ node dist/server/entry.mjs
 
 环境变量见 `.env.example`（`GITHUB_TOKEN` 等仅 `/api/*` 路由在运行期使用）。
 
+## 下载策略
+
+- 官网下载页与更新日志使用 `/api/download/<filename>?source=auto&tag=<release>`：先由 GitHub 发布元数据验证非草稿 release 与精确资产，再 302 到 `OSS_CDN_BASE`。配置 CDN 时不先 HEAD OSS，也不要求官网持有 OSS 凭据，因此源站暂时不可用不会阻断已缓存的文件。
+- `cdn/oss-proxy.js` 的 Cloudflare 子请求使用稳定签名 URL：命中边缘缓存直接返回，未命中回源私有 OSS；成功资源缓存 30 天，Range 交给 CF 缓存层处理。OSS 网络/响应头超时、HTTP 失败在发送下载响应前 302 到精确 GitHub tag asset，跳转 `no-store`，不缓存故障。416 保留为范围错误，不伪装成源站故障；已开始传输后的断流不能再改为跳转。
+- 阿里云 OSS 默认域名禁止分发 `.apk` / `.ipa`：桶内存为 `<name>.bin`（Content-Type 须为 octet-stream），Worker 回源后覆盖 Content-Type 与 Content-Disposition 为原名；规则见 `src/lib/oss-storage.ts`，上传侧在 `.github/actions/oss-upload`。未配 CDN 时这类对象不走 OSS 直链，回退 GitHub。
+- CDN 自动入口携带 `fallback=github&tag=…`；Worker 校验 tag 与 `<prefix>/<version>/<component>/<asset>` 一致，仓库仅来自 `cdn/wrangler.toml` 的 `GITHUB_REPO`（须与官网一致），不接受任意回退 URL。统一 `v…` release 的全部资产仍在 `app/`；历史 `extension-v…`、`server-v…`、`cli-v…`、`mobile-v…` 使用组件目录，显式 tag 也能区分 `app-v…` 与 `v…`。签名只存在于 CF→OSS 子请求，不下发给 CDN 客户端。
+- 未配置 CDN 时，auto 沿用 OSS HEAD 校验大小后 302 到短时预签名直链、失败回退 GitHub的历史策略；这条非 CDN 兼容路径仍会向客户端提供 OSS 签名。显式 `source=github` 只用 GitHub；`source=oss` 只用已验证 OSS，不可用为 503、不启用 Worker GitHub 回退。缺省/未知 source 保留旧客户端契约。GitHub 仅有过期缓存时只允许 GitHub 直链，不授权 CDN/OSS。
+- Worker 部署与官网部署需配套更新；本地回归：`bun test tests/download-backend.test.ts tests/download-route.test.ts tests/download-source.test.ts`，完整静态与构建检查：`bun run build`。这些测试调用真实路由/Worker 消费者并替换外部 fetch，不代表真实 CF 缓存命中或线上回源演练。
+
 ## 结构
 
 | 位置 | 内容 |

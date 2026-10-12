@@ -207,6 +207,7 @@ export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   bool('bt_enabled', 'true'),
   bool('bt_enable_dht', 'true'),
   bool('bt_enable_upnp', 'true'),
+  bool('bt_enable_utp', 'true'),
   int('bt_port_start', '6881', 1, 65_535),
   int('bt_port_end', '6891', 1, 65_535),
   oneOf('bt_mse_mode', 'enabled', BT_MSE_MODES),

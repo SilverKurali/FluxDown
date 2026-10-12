@@ -8,5 +8,7 @@ routes = [{ pattern = "dl-fluxdown.zerx.dev", custom_domain = true }]
 OSS_BUCKET = "zerx-lab"
 OSS_ENDPOINT = "oss-cn-beijing.aliyuncs.com"
 OSS_RELEASE_PREFIX = "FluxDownRelease"
+# auto 下载失败只回退这个仓库；必须与官网 GITHUB_REPO 保持一致。
+GITHUB_REPO = "zerx-lab/FluxDown"
 
 # 密钥：wrangler secret put OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET

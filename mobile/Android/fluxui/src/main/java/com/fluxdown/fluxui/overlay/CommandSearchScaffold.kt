@@ -11,7 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
@@ -55,7 +55,7 @@ import com.fluxdown.fluxui.theme.FluxTheme
 
 /**
  * 命令搜索全屏壳（§12.31，z74）：实色画布底（不透出下层页面）；入场 scale 1.02→1、模糊 10→0（fluid），出场 snap。
- * 顶部为搜索框（h52、r26、聚焦时 accent@70% 描边）与“取消”；其下 [content] 占满剩余空间并随键盘收缩
+ * 顶部为搜索框（高至少 48dp、圆角胶囊、聚焦时 accent@70% 描边）与“取消”；其下 [content] 占满剩余空间并随键盘收缩
  * （结果列表用 LazyColumn，contentPadding = 0 16 40 自行设置）。显示后自动聚焦并弹出键盘。
  * 返回键 = [onDismiss]。
  *
@@ -151,7 +151,7 @@ private fun SearchField(
 
     Row(
         modifier
-            .height(44.dp)
+            .heightIn(min = 48.dp)
             // Real + 壳内 backdrop = null ⇒ 不透明 glassSolid3；聚焦只加 accent 描边
             .fluxGlass(FluxGlass.G3, shape, kind = FluxGlassKind.Real, strongLine = true)
             .then(if (focused) Modifier.border(1.dp, c.accent.copy(alpha = 0.7f), shape) else Modifier)
@@ -184,7 +184,7 @@ private fun SearchField(
                 "清除",
                 { onQueryChange("") },
                 visualSize = 28.dp,
-                iconSize = 16.dp,
+                iconSize = 18.dp,
                 glass = false,
             )
         }

@@ -421,6 +421,6 @@ private fun IconCell(name: String, selected: Boolean, onClick: () -> Unit, modif
             },
         contentAlignment = Alignment.Center,
     ) {
-        FluxIcon(categoryIcon(name), null, size = 22.dp, tint = if (selected) c.accentHi else c.ink)
+        FluxIcon(categoryIcon(name), null, size = 20.dp, tint = if (selected) c.accentHi else c.ink)
     }
 }

@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -157,7 +158,10 @@ fun RssScreen() {
         modifier = Modifier
             .fillMaxSize()
             .then(if (swipe != null) Modifier.nestedScroll(swipe.nestedScrollConnection) else Modifier),
-        contentPadding = PaddingValues(top = topInset, bottom = space.dockClearance),
+        contentPadding = PaddingValues(
+            top = topInset,
+            bottom = space.dockClearance + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding(),
+        ),
     ) {
         item(key = "header") {
             FluxHeader(
@@ -348,7 +352,7 @@ private fun FeedRow(
     val openMenu = { overlays.showMenu(rectBox.rect, menuItems, header = title) }
 
     val startActions = listOf(
-        FluxSwipeAction(str(R.string.rssRefreshNow), FluxIcons.RefreshCw, FluxSwipeTone.Accent, onRefresh),
+        FluxSwipeAction(str(R.string.rssRefreshNow), FluxIcons.RefreshCw, FluxSwipeTone.Accent, onClick = onRefresh),
     )
     val endActions = listOf(
         FluxSwipeAction(

@@ -373,7 +373,7 @@ jobs:
               raise SystemExit(f"expected one librqbit package, found {len(packages)}")
           package = packages[0]
           manifest = pathlib.Path(package["manifest_path"]).as_posix()
-          if package["version"] != "9.0.0":
+          if package["version"] != "9.0.1":
               raise SystemExit(f"unexpected librqbit version: {package['version']}")
           source = package["source"] or ""
           prefix = "git+https://github.com/zerx-lab/rqbit?rev="

@@ -51,11 +51,11 @@ data class SelectionDockAction(
 /**
  * 选择坞（01 §12.4）：多选模式下接替 [FluxDock] 的批量操作条，与坞同一浮动表面（[floatingChromeSurface]）。
  *
- * 布局同 [FluxDock]：占满父容器宽度、高 64，本体宽 = 容器宽 − [reservedEnd]（右侧留给 [FluxOrb] 的“退出选择”球）；
+ * 布局同 [FluxDock]：占满父容器宽度、高为主题 dockHeight，本体宽 = 容器宽 − [reservedEnd]（右侧留给 [FluxOrb] 的“退出选择”球）；
  * Expanded 档浮在列表区底部居中时传 `reservedEnd = 0.dp` 并给 `modifier` 加 `widthIn(max = 560.dp)`。
  *
  * - 计数块：`mono 17 / 600` 数字（accentHi）+ micro 标签（[selectAllLabel] / 全选后 [deselectAllLabel]），点按 → [onToggleAll]。
- * - 动作：48×52（图标 22 + micro 文字），`fontScale ≥ 1.3` 只显示图标（描述保留）；放不下时横向滚动。
+ * - 动作：48×48（图标 20 + micro 文字），`fontScale ≥ 1.3` 只显示图标（描述保留）；放不下时横向滚动。
  * - 出入场：`translateY 18→0、scale .94→1`（`liquid`）。
  * - a11y：计数块 `liveRegion = Polite` 播报“已选 N 项”。
  */
@@ -67,7 +67,7 @@ fun SelectionDock(
     actions: List<SelectionDockAction>,
     visible: Boolean,
     modifier: Modifier = Modifier,
-    reservedEnd: Dp = 76.dp,
+    reservedEnd: Dp = FluxTheme.space.dockHeight + 12.dp,
     selectAllLabel: String = "已选 · 全选",
     deselectAllLabel: String = "取消全选",
     countDescription: (Int) -> String = { "已选 $it 项" },
@@ -77,7 +77,7 @@ fun SelectionDock(
 ) {
     val motion = FluxTheme.motion
     val presence = rememberChromePresence(visible, motion.liquid)
-    Box(modifier.fillMaxWidth().height(64.dp)) {
+    Box(modifier.fillMaxWidth().height(FluxTheme.space.dockHeight)) {
         if (!presence.composed) return@Box
         val c = FluxTheme.colors
         val type = FluxTheme.type
@@ -88,7 +88,7 @@ fun SelectionDock(
             Modifier
                 .padding(end = reservedEnd)
                 .fillMaxWidth()
-                .height(64.dp)
+                .height(FluxTheme.space.dockHeight)
                 .chromeFade(translateY = 18.dp, scaleFrom = 0.94f) { presence.progress.value }
                 .floatingChromeSurface(shape)
                 .clip(shape)
@@ -106,27 +106,30 @@ fun SelectionDock(
             }
             Column(
                 Modifier
-                    .height(44.dp)
+                    .widthIn(min = FluxTheme.space.touch)
+                    .height(FluxTheme.space.touch)
                     .clip(RoundedCornerShape(22.dp))
                     .fluxPressable(onClick = onToggleAll, scale = 0.95f, enabled = visible)
                     .padding(start = 6.dp, end = 12.dp)
                     .semantics {
                         liveRegion = LiveRegionMode.Polite
-                        this.contentDescription = countDescription(count)
+                        this.contentDescription = "${countDescription(count)}, ${if (allSelected) deselectAllLabel else selectAllLabel}"
                         stateDescription = if (allSelected) allSelectedDescription else notAllSelectedDescription
                     },
                 verticalArrangement = Arrangement.Center,
             ) {
                 FluxText(count.toString(), modifier = Modifier.clearAndSetSemantics { }, style = numStyle, color = c.accentHi, maxLines = 1, softWrap = false)
-                FluxText(
-                    if (allSelected) deselectAllLabel else selectAllLabel,
-                    modifier = Modifier.padding(top = 3.dp).clearAndSetSemantics { },
-                    style = type.micro,
-                    color = c.inkMuted,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Clip,
-                )
+                if (!iconOnly) {
+                    FluxText(
+                        if (allSelected) deselectAllLabel else selectAllLabel,
+                        modifier = Modifier.padding(top = 3.dp).clearAndSetSemantics { },
+                        style = type.micro,
+                        color = c.inkMuted,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Clip,
+                    )
+                }
             }
             Row(
                 Modifier
@@ -153,8 +156,8 @@ private fun SelectionActionButton(action: SelectionDockAction, iconOnly: Boolean
     }
     Column(
         Modifier
-            .widthIn(min = 48.dp)
-            .height(52.dp)
+            .widthIn(min = FluxTheme.space.touch)
+            .height(FluxTheme.space.touch)
             .graphicsLayer { alpha = if (action.enabled) 1f else 0.32f }
             .clip(RoundedCornerShape(22.dp))
             .fluxPressable(
@@ -168,7 +171,7 @@ private fun SelectionActionButton(action: SelectionDockAction, iconOnly: Boolean
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterVertically),
     ) {
-        FluxIcon(action.icon, null, size = 22.dp, tint = tint)
+        FluxIcon(action.icon, null, size = 20.dp, tint = tint)
         if (!iconOnly) {
             FluxText(
                 action.label,

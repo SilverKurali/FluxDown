@@ -60,6 +60,7 @@ struct BtPage: View {
             if BtSettingsRow.enabled.isVisible(in: form) { ConfigToggleRow(item: BtSettingsRow.enabled.item) }
             if BtSettingsRow.dht.isVisible(in: form) { ConfigToggleRow(item: BtSettingsRow.dht.item) }
             if BtSettingsRow.upnp.isVisible(in: form) { ConfigToggleRow(item: BtSettingsRow.upnp.item) }
+            if BtSettingsRow.utp.isVisible(in: form) { ConfigToggleRow(item: BtSettingsRow.utp.item) }
             if BtSettingsRow.portStart.isVisible(in: form) {
                 ConfigNumberRow(item: BtSettingsRow.portStart.item, range: BtPortRange.bounds, fallback: 6881)
             }

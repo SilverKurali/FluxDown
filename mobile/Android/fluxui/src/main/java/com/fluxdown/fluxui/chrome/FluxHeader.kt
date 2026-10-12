@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
@@ -52,7 +53,7 @@ enum class PageLead { Back, Close, None }
 /**
  * 页头玻璃圆钮（`.ibtn.glass`）：Flat 玻璃 G2，按压 `scale .92`。
  * [on] = accentLo 底 + accentHi 图标 + accent 40% 描边；[dot] = 右上 7dp 提示点。
- * 命中区由 Compose 默认最小触摸目标（48dp）扩展。
+ * 视觉圆面默认 40dp，独立命中区至少 48dp。
  */
 @Composable
 fun FluxGlassIconButton(
@@ -61,8 +62,8 @@ fun FluxGlassIconButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     on: Boolean = false,
-    size: Dp = 44.dp,
-    iconSize: Dp = if (size <= 36.dp) 18.dp else 22.dp,
+    size: Dp = 40.dp,
+    iconSize: Dp = if (size <= 36.dp) 18.dp else 20.dp,
     dot: Boolean = false,
     enabled: Boolean = true,
     onDescription: String = "已开启",
@@ -70,33 +71,39 @@ fun FluxGlassIconButton(
     val c = FluxTheme.colors
     Box(
         modifier
-            .size(size)
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
             .fluxPressable(onClick = onClick, scale = 0.92f, enabled = enabled, role = Role.Button)
-            .then(
-                if (on) {
-                    Modifier
-                        .background(c.accentLo, CircleShape)
-                        .border(0.5.dp, c.accent.copy(alpha = if (c.dark) 0.40f else 0.24f), CircleShape)
-                } else {
-                    Modifier.fluxGlass(FluxGlass.G2, CircleShape, kind = FluxGlassKind.Flat)
-                },
-            )
             .semantics {
                 this.contentDescription = contentDescription
                 if (on) stateDescription = onDescription
             },
         contentAlignment = Alignment.Center,
     ) {
-        FluxIcon(icon, null, size = iconSize, tint = if (on) c.accentHi else c.ink)
-        if (dot) {
-            Box(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .offset(x = (-10).dp, y = 10.dp)
-                    .size(7.dp)
-                    .fluxGlow(c.accentHi, 4.dp, CircleShape)
-                    .background(c.accentHi, CircleShape),
-            )
+        Box(
+            Modifier
+                .size(size)
+                .then(
+                    if (on) {
+                        Modifier
+                            .background(c.accentLo, CircleShape)
+                            .border(0.5.dp, c.accent.copy(alpha = if (c.dark) 0.40f else 0.24f), CircleShape)
+                    } else {
+                        Modifier.fluxGlass(FluxGlass.G2, CircleShape, kind = FluxGlassKind.Flat)
+                    },
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            FluxIcon(icon, null, size = iconSize, tint = if (on) c.accentHi else c.ink)
+            if (dot) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .offset(x = (-8).dp, y = 8.dp)
+                        .size(7.dp)
+                        .fluxGlow(c.accentHi, 4.dp, CircleShape)
+                        .background(c.accentHi, CircleShape),
+                )
+            }
         }
     }
 }
@@ -191,7 +198,7 @@ fun FluxHeader(
         }
         Row(
             Modifier.padding(top = if (small) 0.dp else 2.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
             content = actions,
         )
@@ -199,7 +206,7 @@ fun FluxHeader(
 }
 
 /**
- * 推入页头（`.pagehead`）：左 [lead] 钮（44dp 玻璃 ‹ / ✕）、居中 `h2 600` 标题（[leftAligned] 时靠左）、
+ * 推入页头（`.pagehead`）：左 [lead] 钮（40dp 玻璃 ‹ / ✕，48dp 命中区）、居中 `h2 600` 标题（[leftAligned] 时靠左）、
  * 可选 micro 副标题、右操作槽。两侧占位等宽以保证标题真居中。
  *
  * 应满宽放置（水平内边距取 `screenMargin`），吸顶由调用方负责；[scrolled] = 内容已滚动超过 6dp 时，
@@ -236,7 +243,7 @@ fun FluxPageHead(
 
     Layout(
         content = {
-            Box(Modifier.defaultMinSize(minWidth = if (lead == PageLead.None) 0.dp else 44.dp)) {
+            Box(Modifier.defaultMinSize(minWidth = if (lead == PageLead.None) 0.dp else 48.dp)) {
                 when (lead) {
                     PageLead.Back -> FluxGlassIconButton(FluxIcons.ChevronLeft, backDescription, onLead)
                     PageLead.Close -> FluxGlassIconButton(FluxIcons.X, closeDescription, onLead)
@@ -253,8 +260,8 @@ fun FluxPageHead(
                 }
             }
             Row(
-                Modifier.defaultMinSize(minWidth = 44.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                Modifier.defaultMinSize(minWidth = 48.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically,
                 content = actions,
             )
@@ -285,7 +292,7 @@ fun FluxPageHead(
             total - 2 * max(leadP.width, actP.width) - 2 * gap
         }.coerceAtLeast(0)
         val titleP = measurables[1].measure(Constraints(maxWidth = titleMax))
-        val h = max(max(leadP.height, actP.height), max(titleP.height, 44.dp.roundToPx()))
+        val h = max(max(leadP.height, actP.height), max(titleP.height, 48.dp.roundToPx()))
         layout(total, h) {
             leadP.place(0, (h - leadP.height) / 2)
             actP.place(total - actP.width, (h - actP.height) / 2)

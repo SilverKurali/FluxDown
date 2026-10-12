@@ -59,6 +59,10 @@ sealed interface SheetRoute {
 class AppNavigator {
     var tab by mutableStateOf(AppTab.Downloads)
         private set
+
+    /** 显式导航优先于尚未结束的根页拖动，包括再次点选当前标签。 */
+    var revision by mutableStateOf(0L)
+        private set
     val stack = mutableStateListOf<Route>()
     var sheet by mutableStateOf<SheetRoute?>(null)
         private set
@@ -91,6 +95,7 @@ class AppNavigator {
     val top: Route? get() = stack.lastOrNull()
 
     fun selectTab(t: AppTab) {
+        revision++
         if (tab != t) {
             tab = t
             stack.clear()
@@ -99,40 +104,59 @@ class AppNavigator {
         }
     }
 
+    /** 仅允许从同一导航快照开始的根页手势在落定后提交。 */
+    internal fun selectTabFromSwipe(t: AppTab, expectedRevision: Long): Boolean {
+        if (revision != expectedRevision || stack.isNotEmpty() || sheet != null || searchOpen || selecting) return false
+        if (tab != t) selectTab(t)
+        return true
+    }
+
     fun push(r: Route) {
         val top = stack.lastOrNull()
         when {
             top == r -> Unit
             // 列表旁的详情栏 / 详情页内跳转：替换而不是堆叠，返回直接回到列表
-            top is Route.TaskDetail && r is Route.TaskDetail -> stack[stack.lastIndex] = r
-            else -> stack.add(r)
+            top is Route.TaskDetail && r is Route.TaskDetail -> {
+                revision++
+                stack[stack.lastIndex] = r
+            }
+            else -> {
+                revision++
+                stack.add(r)
+            }
         }
     }
 
     fun pop(): Boolean {
         if (stack.isEmpty()) return false
         stack.removeAt(stack.lastIndex)
+        revision++
         return true
     }
 
     fun openSheet(s: SheetRoute) {
+        revision++
         sheet = s
         dockMini = false
     }
 
     fun closeSheet() {
+        if (sheet != null) revision++
         sheet = null
     }
 
     fun openSearch() {
+        if (!searchOpen) revision++
         searchOpen = true
     }
 
     fun closeSearch() {
+        if (searchOpen) revision++
         searchOpen = false
     }
 
     fun enterSelection(firstId: String? = null) {
+        revision++
         selecting = true
         dockMini = false
         if (firstId != null) selection.add(firstId)
@@ -143,6 +167,7 @@ class AppNavigator {
     }
 
     fun exitSelection() {
+        if (selecting) revision++
         selecting = false
         selection.clear()
     }

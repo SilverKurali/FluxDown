@@ -46,10 +46,10 @@ class FluxSpace(
     /** compact 16dp；medium / expanded 20dp（由 FluxTheme 按窗口宽度注入）。 */
     val screenMargin: Dp = 16.dp,
     val touch: Dp = 48.dp,
-    /** 导航坞高 64 + 底距 26 + 气隙 22。 */
-    val dockHeight: Dp = 64.dp,
-    /** 有坞页面内容底部留白（dock-h 112 + 24）。 */
-    val dockClearance: Dp = 136.dp,
+    /** 导航坞与新建球的常态高度。 */
+    val dockHeight: Dp = 56.dp,
+    /** 有坞页面底部留白：坞高 + 底距 8 + 内容气隙 16；页面另加系统导航栏 inset。 */
+    val dockClearance: Dp = dockHeight + 24.dp,
     /** 推入页（无坞）内容底部留白。 */
     val pageClearance: Dp = 56.dp,
 )

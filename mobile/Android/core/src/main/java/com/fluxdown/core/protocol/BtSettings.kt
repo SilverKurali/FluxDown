@@ -20,6 +20,7 @@ enum class BtSettingsRow(val slug: String, val tab: BtSettingsTab, val configKey
     Enabled("enabled", BtSettingsTab.General, "bt_enabled"),
     Dht("dht", BtSettingsTab.General, "bt_enable_dht"),
     Upnp("upnp", BtSettingsTab.General, "bt_enable_upnp"),
+    Utp("utp", BtSettingsTab.General, "bt_enable_utp"),
     PortStart("portStart", BtSettingsTab.General, "bt_port_start"),
     PortEnd("portEnd", BtSettingsTab.General, "bt_port_end"),
     MseMode("mseMode", BtSettingsTab.General, "bt_mse_mode"),

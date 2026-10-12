@@ -155,7 +155,7 @@ fun FluxButton(
 
 /** 图标按钮尺寸：圆直径 / 图标。命中区一律补足 48dp。 */
 enum class IconButtonSize(internal val dp: Dp, internal val icon: Dp) {
-    Sm(36.dp, 20.dp), Md(44.dp, 22.dp), Lg(52.dp, 24.dp)
+    Sm(36.dp, 18.dp), Md(40.dp, 20.dp), Lg(48.dp, 20.dp)
 }
 
 /**

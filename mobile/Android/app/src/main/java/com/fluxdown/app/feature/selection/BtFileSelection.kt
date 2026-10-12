@@ -259,8 +259,8 @@ private fun folderState(node: BtFolderNode, selected: Set<Int>): ToggleableState
 
 private fun indent(depth: Int) = (16 + min(depth, 4) * 16).dp
 
-/** 目录行折叠箭头槽（32dp）+ 行内间距（10dp）：文件行勾选框与同层目录的勾选框对齐。 */
-private val CHEVRON_GUTTER = 42.dp
+/** 目录行折叠箭头命中槽（48dp）+ 行内间距（10dp）：文件行勾选框与同层目录的勾选框对齐。 */
+private val CHEVRON_GUTTER = 58.dp
 
 @Composable
 private fun FolderRow(
@@ -291,7 +291,7 @@ private fun FolderRow(
         ) {
             Box(
                 Modifier
-                    .size(width = 32.dp, height = 50.dp)
+                    .size(width = 48.dp, height = 50.dp)
                     .clickable(role = Role.Button, onClickLabel = expandLabel, onClick = onToggleCollapse),
                 contentAlignment = Alignment.Center,
             ) {
@@ -299,7 +299,7 @@ private fun FolderRow(
                     FluxIcons.ChevronDown,
                     null,
                     modifier = Modifier.graphicsLayer { rotationZ = if (collapsed) -90f else 0f },
-                    size = 16.dp,
+                    size = 18.dp,
                     tint = c.inkMuted,
                 )
             }
