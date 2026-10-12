@@ -3,13 +3,15 @@
 #
 # 行为：
 #   schedule（每日） / push(main) / workflow_dispatch →
-#   1. sync-upstream：上游 main 有新提交时合并进 fork main（含 tags）并推送；
+#   1. sync-upstream：上游 main 有新提交时合并进 fork main 并推送（不推 tag）；
 #   2. build-rpm：release 构建 4 个二进制 → rpmbuild（packaging/rpm/）→
 #      上传到滚动预发布 `fork-rpm`（固定名 fluxdown-latest-linux-x64.rpm + 版本化文件名）。
 #   schedule 且上游无更新时跳过构建；push / 手动触发总是构建。
 #
 # RPM Release = run_number + 100：单调递增且恒大于本地手工构建的 -1/-2，保证 dnf 升级语义。
-# 云账户功能需要 FLUXCLOUD_BASE_URL secret（与官方构建一致；未配置时回退 127.0.0.1:8720）。
+# 需要的 secret：
+#   FORK_SYNC_TOKEN      —— 推送同步合并用，必须能写 .github/workflows/**（见 sync-upstream）
+#   FLUXCLOUD_BASE_URL   —— 云账户功能（与官方构建一致；未配置时回退 127.0.0.1:8720）
 name: Fork RPM
 
 on:
@@ -39,16 +41,34 @@ jobs:
     outputs:
       updated: ${{ steps.sync.outputs.updated }}
     steps:
+      # 必须用带 workflow 范围的 PAT：上游一旦改动 .github/workflows/**，
+      # GITHUB_TOKEN（GitHub App 身份）的推送会被整体拒绝，且 'workflows' 不是
+      # permissions 键的合法取值，无法在文件内申请。
+      - name: Require FORK_SYNC_TOKEN
+        env:
+          TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$TOKEN" ] || {
+            echo "::error::缺少 FORK_SYNC_TOKEN secret（需 Contents:RW + Workflows:RW）"
+            exit 1
+          }
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.FORK_SYNC_TOKEN }}
 
       - name: Merge upstream main
         id: sync
+        env:
+          # PAT 推送会触发新的 push 事件工作流（GITHUB_TOKEN 不会）；
+          # [skip ci] 让同步推送不再额外拉起一轮构建，与本 job 后续的 build-rpm 去重。
+          MERGE_MSG: "chore(fork): 同步上游 main [skip ci]"
         run: |
           set -euo pipefail
           git remote add upstream "$UPSTREAM_REPO"
-          git fetch upstream main --tags --no-recurse-submodules
+          git fetch upstream main --no-recurse-submodules
           BEHIND=$(git rev-list --count HEAD..upstream/main)
           echo "behind=$BEHIND"
           if [ "$BEHIND" = "0" ]; then
@@ -57,9 +77,11 @@ jobs:
           fi
           git config user.name "fork-sync-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git merge --no-edit upstream/main
+          git merge --no-edit -m "$MERGE_MSG" upstream/main
+          # 不推 tag：上游 v* tag 一进 fork 就会触发 fork 里那份上游 release.yml
+          # （on: push tags v*），而 build-rpm 的版本推导是现场 fetch upstream --tags，
+          # 不依赖 fork 侧有 tag。
           git push origin main
-          git push origin --tags
           echo "updated=true" >> "$GITHUB_OUTPUT"
 
   build-rpm:
