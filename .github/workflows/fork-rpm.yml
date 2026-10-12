@@ -21,8 +21,11 @@ on:
   push:
     branches: [main]
 
+# workflows: write —— 上游改动 .github/workflows/** 时，GitHub 会拒掉只有 contents:write
+# 的 GITHUB_TOKEN 推送（"refusing to allow a GitHub App to create or update workflow"）。
 permissions:
   contents: write
+  workflows: write
 
 concurrency:
   group: fork-rpm
