@@ -1,4 +1,4 @@
-import FluxDomain
+@testable import FluxDomain
 import Testing
 
 struct DomainRulesTests {
@@ -47,6 +47,39 @@ struct DomainRulesTests {
         #expect(en("cancel") == "Cancel")
         #expect(zh("__missing_key__") == "__missing_key__")
         #expect(L10n.fill("{n} items", ["n": 3]) == "3 items")
+    }
+
+    @Test(arguments: [
+        "zh-TW", "zh-tw", "ZH_TW", " ZH_hant_hk ", "zh-Hant", "zh-Hant-TW", "zh-Hant-CN",
+        "zh-HK", "zh-MO", "zh-HK-u-nu-hanidec", "zh-Hant-HK-u-nu-hanidec",
+    ])
+    func traditionalChineseLocalesLoadSharedTaiwaneseResources(language: String) {
+        let translation = L10n(locale: language)
+        #expect(translation.locale == "zh-TW")
+        #expect(translation("settings") == "設定")
+        #expect(translation("__missing_key__") == "__missing_key__")
+    }
+
+    @Test(arguments: [
+        "zh", "zh-CN", "zh-SG", "zh-Hans", "zh-Hans-TW", "zh-Hans-HK", "zh-Hans-MO",
+        "zh-Hans-HK-u-nu-hanidec", "zh-Hantfoo", "zh-TWfoo", "zh-Latn-TW",
+    ])
+    func simplifiedChineseAndExplicitScriptsRemainSimplified(language: String) {
+        let translation = L10n(locale: language)
+        #expect(translation.locale == "zh")
+        #expect(translation("settings") == "设置")
+    }
+
+    @Test func languageResolutionPreservesPreferenceOrderCanonicalNamesAndFallbacks() {
+        let available: Set<String> = ["en", "zh", "zh-TW"]
+        #expect(L10n.resolve(preferred: ["xx-YY", "zh-HK", "en"], available: available) == "zh-TW")
+        #expect(L10n.resolve(preferred: ["en-US", "zh-TW"], available: available) == "en")
+        #expect(L10n.resolve(preferred: ["zh-HK"], available: ["en", "zh", "zh-HK", "zh-TW"]) == "zh-HK")
+        #expect(L10n.resolve(preferred: ["zh-Hant"], available: ["en", "zh"]) == "zh")
+        #expect(L10n.resolve(preferred: ["zh-Hant", "en-GB"], available: ["en"]) == "en")
+        #expect(L10n.resolve(preferred: [], available: available) == "en")
+        #expect(L10n.resolve(preferred: ["xx-YY"], available: available) == "en")
+        #expect(L10n(locale: "xx-YY")("cancel") == "Cancel")
     }
 
     @Test func taskProtocolAndShareUrlFollowSentinels() {

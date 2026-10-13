@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "launch-process|str-replace-editor|save-file",
+        "hooks": [
+          { "type": "command", "command": "python3 .augment/hooks/ttsr.sh", "timeout": 10000 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "launch-process|str-replace-editor|save-file",
+        "hooks": [
+          { "type": "command", "command": "python3 .augment/hooks/ttsr.sh", "timeout": 10000 }
+        ]
+      }
+    ]
+  }
+}

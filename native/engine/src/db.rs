@@ -581,6 +581,9 @@ pub struct Db {
     /// CDN 上传租约已知为空的内存缓存，空闲 peek 据此免读数据库。
     cdn_lease_known_empty: Arc<AtomicBool>,
     activity_lock: Arc<tokio::sync::Mutex<()>>,
+    /// 任务整表快照「读库 + 发出」与终态进度帧发出之间的顺序门，见
+    /// [`Self::lock_event_order`]。
+    event_order_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// 把 `AnyRow` 手动映射为 [`TaskInfo`]（列名 `id`→字段 `task_id`）。
@@ -934,8 +937,24 @@ impl Db {
             pool,
             backend,
             activity_lock: Arc::new(tokio::sync::Mutex::new(())),
+            event_order_gate: Arc::new(tokio::sync::Mutex::new(())),
             cdn_lease_known_empty: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// 获取事件顺序门。同一数据库句柄（含所有克隆）共用一把门。
+    ///
+    /// 整表快照先读库、后发帧；任务完成则是先落库 `status=3`、后发终态进度帧。
+    /// 两者并发时，读库早于落库的快照可能晚于终态帧发出，把已完成的行改回
+    /// 「下载中」（该任务之后没有新快照时会永久停在旧状态）。
+    ///
+    /// 约定：快照在持门期间完成「读库 + 发出」；进度汇报器发非活跃态
+    /// （完成 / 失败 / 暂停）帧前先取门；actor 之外先落库再读库发帧的路径
+    /// （如做种状态帧）同样在持门期间「读库 + 发出」。这样落库发生在快照读取之后的任务，
+    /// 其终态帧必然排在该快照之后；落库先于读取的任务，快照读到的已是新状态。
+    /// 持门期间不得等待进度汇报器。
+    pub async fn lock_event_order(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.event_order_gate.lock().await
     }
 
     async fn init_schema(&self) -> Result<(), DbError> {

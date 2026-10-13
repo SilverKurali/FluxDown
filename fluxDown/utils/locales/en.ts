@@ -6,6 +6,7 @@ import type { MessageKey } from "./zh-CN";
 const en: Record<MessageKey, string> = {
   // Header
   "header.themeToggle": "Toggle theme",
+  "header.languageSwitch": "Switch to {language}",
   "header.checking": "Checking...",
   "header.connected": "Connected",
   "header.disconnected": "Disconnected",

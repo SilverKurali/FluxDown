@@ -4,6 +4,7 @@
 const zhCN = {
   // Header
   "header.themeToggle": "切换主题",
+  "header.languageSwitch": "切换至{language}",
   "header.checking": "检测中...",
   "header.connected": "已连接",
   "header.disconnected": "未连接",

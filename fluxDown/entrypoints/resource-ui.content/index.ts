@@ -32,7 +32,7 @@ import {
   stringifyResourceDebugLog,
 } from '@/utils/resource-debug-log';
 import type { MessageKey } from '@/utils/locales/zh-CN';
-import { initI18n, setLocale, t } from '@/utils/i18n';
+import { initI18n, t } from '@/utils/i18n';
 import { loadSettings } from '@/utils/settings';
 import './style.css';
 
@@ -258,15 +258,13 @@ export default defineContentScript({
     });
 
     /* ========== 语言变化监听 ========== */
-    browser.storage.onChanged.addListener((changes, area) => {
+    browser.storage.onChanged.addListener(async (changes, area) => {
       if (area !== 'local') return;
       if (changes['fluxdown_locale']) {
-        const newLocale = changes['fluxdown_locale'].newValue;
-        if (newLocale) {
-          setLocale(newLocale);
-          refreshStaticTexts();
-          render();
-        }
+        // 移除手动语言时也要重新检测浏览器，不能停留在上次的繁/简中文。
+        await initI18n();
+        refreshStaticTexts();
+        render();
       }
       if (DOT_VISIBLE_KEY in changes) {
         applyDotVisibility(changes[DOT_VISIBLE_KEY].newValue !== false);

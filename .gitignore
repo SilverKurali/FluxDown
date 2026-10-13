@@ -67,6 +67,7 @@ website/.vercel/
 .swarm/
 .mcp.json
 .agents/
+.augment/settings.local.json
 skills-lock.json
 
 website/fluxdown-website-latest.tar

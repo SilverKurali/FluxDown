@@ -40,5 +40,9 @@ pub fn open_category_editor(
 
 /// 将 FluxDown locale 映射为 gpui-component 支持的 locale。
 pub fn component_locale(locale: &str) -> &str {
-    if locale == "zh" { "zh-CN" } else { "en" }
+    match locale {
+        "zh" => "zh-CN",
+        "zh-tw" => "zh-TW",
+        _ => "en",
+    }
 }

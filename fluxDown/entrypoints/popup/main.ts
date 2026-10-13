@@ -7,7 +7,7 @@
  * - 任务面板：轮询 NMH 任务列表并增量渲染（下载中 / 最近完成）
  * - App 未运行时的空态引导（一键启动）
  * - 空闲态下的快捷 URL 下载
- * - 主题切换 / 多语言支持（中/英）
+ * - 主题切换 / 多语言支持（简中/繁中/英文）
  *
  * 与 background 的通信严格遵循共享 Contract（type 字段）：
  *   - {type:'nmh-tasks'} → {ok, connected, tasks}
@@ -21,7 +21,7 @@
  */
 
 import { browser } from 'wxt/browser';
-import { initI18n, applyI18nToDOM, t, getLocale, saveLocale } from '@/utils/i18n';
+import { initI18n, applyI18nToDOM, t, getLocale, getNextLocale, saveLocale } from '@/utils/i18n';
 import { checkFluxDownAvailable } from '@/utils/download-dispatch';
 import { exportConnectionDiagnostics } from "@/utils/connection-diagnostics";
 import { loadSettings, saveSettings } from '@/utils/settings';
@@ -1592,18 +1592,15 @@ function updateRemoteModeGate(verified: boolean): void {
 }
 
 // ===== 语言切换 =====
-function isZh(): boolean {
-  return getLocale().startsWith('zh');
-}
-
 function updateLangButton() {
-  langLabel.textContent = isZh() ? '中' : 'EN';
-  langBtn.title = isZh() ? 'Switch to English' : '切换到中文';
+  const lang = getLocale();
+  langLabel.textContent = lang === 'zh-TW' ? '繁' : lang === 'zh-CN' ? '简' : 'EN';
+  const languageNames = { 'zh-CN': '简体中文', 'zh-TW': '繁體中文（台灣）', en: 'English' };
+  langBtn.title = t('header.languageSwitch', { language: languageNames[getNextLocale()] });
 }
 
 async function toggleLang() {
-  const next = isZh() ? 'en' : 'zh-CN';
-  await saveLocale(next);
+  await saveLocale(getNextLocale());
   applyI18nToDOM();
   updateLangButton();
   updateEnableHint(enableToggle.checked);

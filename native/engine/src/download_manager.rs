@@ -6032,6 +6032,8 @@ impl DownloadManager {
             }
         }
 
+        let order_db = self.db.clone();
+        let order = order_db.lock_event_order().await;
         let mut tasks = match self.db.load_all_tasks().await {
             Ok(t) => t,
             Err(error) => {
@@ -6355,6 +6357,7 @@ impl DownloadManager {
             .collect();
 
         self.sink.emit(EngineEvent::TasksSnapshot(tasks));
+        drop(order);
 
         // Send persisted segment data for each task so the UI can display
         // download distribution immediately after app restart.
@@ -6435,6 +6438,9 @@ impl DownloadManager {
     /// 对比 [`Self::load_and_send_all_tasks`]：不做启动矫正、不逐任务重发分段
     /// 数据——N 任务只产生一条 [`EngineEvent::TasksSnapshot`]。
     pub async fn send_tasks_snapshot(&self) {
+        // 读库与发出必须在同一次持门内完成，否则读库后才完成的任务会被这份
+        // 旧快照回退成「下载中」，见 `Db::lock_event_order`。
+        let _order = self.db.lock_event_order().await;
         match self.db.load_all_tasks().await {
             Ok(tasks) => self.sink.emit(EngineEvent::TasksSnapshot(tasks)),
             Err(e) => log_info!("[manager] send_tasks_snapshot error: {}", e),
@@ -12334,6 +12340,8 @@ async fn emit_seeding_progress(
     seeding_status: i32,
     seeding_message: &str,
 ) {
+    // 读库 + 发出同样要与在途整表快照互斥，见 `Db::lock_event_order`。
+    let _order = db.lock_event_order().await;
     match db.load_task_by_id(task_id).await {
         Ok(Some(t)) => {
             sink.emit(EngineEvent::TaskProgress {
@@ -12603,22 +12611,31 @@ pub async fn progress_reporter(
             if report_speed > 0 {
                 state.sent_nonzero_speed = true;
             }
-            sink.emit(EngineEvent::TaskProgress {
-                task_id: update.task_id.clone(),
-                status: update.status,
-                downloaded_bytes: update.downloaded_bytes,
-                total_bytes: update.total_bytes,
-                speed: report_speed,
-                file_name: resolved_name,
-                save_dir: String::new(),
-                url: String::new(),
-                error_message: update.error_message.clone(),
-                upload_speed_bps: if is_terminal { 0 } else { state.upload_bps },
-                uploaded_bytes: cumulative_uploaded,
-                seeding_status: update.seeding_status,
-                seeding_message: update.seeding_message.clone(),
-                seeding_time_secs: update.seeding_time_secs,
-            });
+            {
+                // 非活跃态（完成 / 失败 / 暂停 / 做种）帧要排在读库早于落库的
+                // 在途整表快照之后；活跃态帧每 500ms 自带纠正，不取门。
+                let _order = if update.status != 1 && update.status != 5 {
+                    Some(db.lock_event_order().await)
+                } else {
+                    None
+                };
+                sink.emit(EngineEvent::TaskProgress {
+                    task_id: update.task_id.clone(),
+                    status: update.status,
+                    downloaded_bytes: update.downloaded_bytes,
+                    total_bytes: update.total_bytes,
+                    speed: report_speed,
+                    file_name: resolved_name,
+                    save_dir: String::new(),
+                    url: String::new(),
+                    error_message: update.error_message.clone(),
+                    upload_speed_bps: if is_terminal { 0 } else { state.upload_bps },
+                    uploaded_bytes: cumulative_uploaded,
+                    seeding_status: update.seeding_status,
+                    seeding_message: update.seeding_message.clone(),
+                    seeding_time_secs: update.seeding_time_secs,
+                });
+            }
             if let Some(mut runtime) = state.cached_runtime.clone() {
                 if is_terminal {
                     runtime.sampled_at_ms = chrono::Utc::now().timestamp_millis();
@@ -16849,6 +16866,131 @@ mod tests {
             bt_finished_count, 1,
             "second bt_data_finished=true mark on the same task must not refire"
         );
+    }
+
+    fn progress_statuses(sink: &RecordingSink) -> Vec<i32> {
+        sink.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                EngineEvent::TaskProgress { status, .. } => Some(status),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 在途整表快照期间，终态进度帧必须等快照发出后再发：读库早于落库的旧快照
+    /// 不得排在该任务完成帧之后，否则已完成的行会被回退成「下载中」。
+    #[tokio::test]
+    async fn terminal_progress_waits_for_in_flight_snapshot() {
+        let (tx, rx) = mpsc::channel(8);
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let handle = tokio::spawn(progress_reporter(rx, db.clone(), sink.clone()));
+
+        let in_flight_snapshot = db.lock_event_order().await;
+        tx.send(ProgressUpdate {
+            task_id: "late".to_owned(),
+            status: 3,
+            downloaded_bytes: 10,
+            total_bytes: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("send terminal update");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            progress_statuses(&sink).is_empty(),
+            "terminal frame must not overtake an in-flight snapshot"
+        );
+
+        drop(in_flight_snapshot);
+        drop(tx);
+        handle
+            .await
+            .expect("reporter task must finish once channel closes");
+        assert_eq!(progress_statuses(&sink), [3]);
+    }
+
+    /// 活跃态进度帧不取顺序门：快照持门期间下载进度不得被阻塞。
+    #[tokio::test]
+    async fn active_progress_does_not_wait_for_snapshot() {
+        let (tx, rx) = mpsc::channel(8);
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let handle = tokio::spawn(progress_reporter(rx, db.clone(), sink.clone()));
+
+        let in_flight_snapshot = db.lock_event_order().await;
+        tx.send(ProgressUpdate {
+            task_id: "live".to_owned(),
+            status: 1,
+            downloaded_bytes: 5,
+            total_bytes: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("send active update");
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("active frame must not wait for the snapshot gate")
+            .expect("reporter task must finish once channel closes");
+        assert_eq!(progress_statuses(&sink), [1]);
+        drop(in_flight_snapshot);
+    }
+
+    /// 整表快照「读库 + 发出」必须在持门期间进行，与终态帧互斥。
+    #[tokio::test]
+    async fn tasks_snapshot_holds_event_order_gate() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let manager = sched_manager_with_sink(&db, 1, sink.clone());
+
+        let terminal_frame = db.lock_event_order().await;
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            manager.send_tasks_snapshot(),
+        )
+        .await;
+        assert!(blocked.is_err(), "snapshot must wait for the gate holder");
+        assert!(sink.events().is_empty());
+
+        drop(terminal_frame);
+        manager.send_tasks_snapshot().await;
+        assert!(
+            sink.events()
+                .iter()
+                .any(|event| matches!(event, EngineEvent::TasksSnapshot(_)))
+        );
+    }
+
+    /// 做种状态帧在 actor 之外先落库、再读库发出，同样不得抢在在途整表快照之前。
+    #[tokio::test]
+    async fn seeding_progress_waits_for_in_flight_snapshot() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        insert_task_at_status(&db, "seed", "/tmp", "seed.bin", 3).await;
+        let sink: Arc<RecordingSink> = Arc::new(RecordingSink::new());
+        let dyn_sink: Arc<dyn EventSink> = sink.clone();
+
+        let in_flight_snapshot = db.lock_event_order().await;
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            emit_seeding_progress(&db, &dyn_sink, "seed", SEEDING_STATUS_ACTIVE, ""),
+        )
+        .await;
+        assert!(blocked.is_err(), "seeding frame must wait for the snapshot");
+        assert!(progress_statuses(&sink).is_empty());
+
+        drop(in_flight_snapshot);
+        emit_seeding_progress(&db, &dyn_sink, "seed", SEEDING_STATUS_ACTIVE, "").await;
+        assert_eq!(progress_statuses(&sink), [3]);
     }
 
     /// BT 上传速率透传契约:活跃状态原样透传 `upload_speed_bps`(latch 进

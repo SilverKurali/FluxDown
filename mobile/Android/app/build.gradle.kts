@@ -6,8 +6,8 @@ plugins {
 }
 
 /**
- * 文案单一事实源 = 仓库根 `assets/i18n/{en,zh}.json`（App / GPUI / Web 共用，AGENTS.md §5）。
- * 构建期生成 `values/strings.xml`（en，默认）与 `values-zh/strings.xml`，键名原样（camelCase），
+ * 文案单一事实源 = 仓库根 `assets/i18n/{en,zh,zh-TW}.json`（App / GPUI / Web 共用，AGENTS.md §5）。
+ * 构建期生成英文默认、简体中文与繁体中文资源；Hant script 覆盖 TW / HK / MO，不按地域复制翻译。
  * 占位符 `{name}` 原样保留，由 `:app` 的 `fill()` 运行期替换。禁止在 res/ 里手写同名文案。
  */
 abstract class GenerateI18nResources : DefaultTask() {
@@ -22,7 +22,7 @@ abstract class GenerateI18nResources : DefaultTask() {
     fun generate() {
         val out = outputDir.get().asFile
         out.deleteRecursively()
-        mapOf("en" to "values", "zh" to "values-zh").forEach { (lang, dir) ->
+        mapOf("en" to "values", "zh" to "values-zh", "zh-TW" to "values-b+zh+Hant").forEach { (lang, dir) ->
             val src = i18nDir.file("$lang.json").get().asFile
             @Suppress("UNCHECKED_CAST")
             val map = JsonSlurper().parse(src) as Map<String, Any?>
@@ -181,8 +181,8 @@ android {
         compose = true
     }
     androidResources {
-        // 仅打包有基线翻译的语言（assets/i18n 的 en / zh）；生成 localeConfig 供系统“应用语言”设置列出
-        localeFilters += listOf("en", "zh")
+        // 生成 localeConfig 供系统“应用语言”设置列出；Android 按 script 匹配繁中（TW / HK / MO）。
+        localeFilters += listOf("en", "zh", "b+zh+Hant")
         generateLocaleConfig = true
     }
 }

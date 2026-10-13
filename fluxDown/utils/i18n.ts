@@ -2,22 +2,23 @@
  * FluxDown i18n 国际化模块
  *
  * - 默认跟随浏览器语言
- * - 支持中文(zh)和英文(en)
+ * - 支持简体中文、繁体中文（台湾）和英文
  * - 不支持的语言回退到英文
  */
 
 import { browser } from 'wxt/browser';
 import zhCN from './locales/zh-CN';
+import zhTW from './locales/zh-TW';
 import en from './locales/en';
 import type { MessageKey } from './locales/zh-CN';
 
 type LocaleMessages = Record<MessageKey, string>;
 
-const locales: Record<string, LocaleMessages> = {
-  'zh': zhCN,
+type Locale = 'zh-CN' | 'zh-TW' | 'en';
+
+const locales: Record<Locale, LocaleMessages> = {
   'zh-CN': zhCN,
-  'zh-TW': zhCN,
-  'zh-HK': zhCN,
+  'zh-TW': zhTW,
   'en': en,
 };
 
@@ -25,19 +26,27 @@ const FALLBACK_LOCALE = 'en';
 const STORAGE_KEY = 'fluxdown_locale';
 
 let currentMessages: LocaleMessages = en;
-let currentLocale: string = FALLBACK_LOCALE;
+let currentLocale: Locale = FALLBACK_LOCALE;
+
+function resolveLocale(locale: unknown): Locale | null {
+  if (typeof locale !== 'string') return null;
+  const [language, scriptOrRegion] = locale.trim().toLowerCase().replaceAll('_', '-').split('-');
+  if (language === 'en') return 'en';
+  if (language !== 'zh') return null;
+  if (scriptOrRegion === 'hant') return 'zh-TW';
+  if (scriptOrRegion === 'hans') return 'zh-CN';
+  // 仅地区子标签决定无显式书写系统的中文；不读取扩展中的地区值。
+  return scriptOrRegion === 'tw' || scriptOrRegion === 'hk' || scriptOrRegion === 'mo' ? 'zh-TW' : 'zh-CN';
+}
 
 /**
  * 检测浏览器语言，返回匹配的 locale key
  */
-function detectBrowserLocale(): string {
-  const langs = navigator.languages ?? [navigator.language];
+function detectBrowserLocale(): Locale {
+  const langs = navigator.languages?.length ? navigator.languages : [navigator.language];
   for (const lang of langs) {
-    // 精确匹配 (如 zh-CN)
-    if (locales[lang]) return lang;
-    // 语言前缀匹配 (如 zh-TW → zh)
-    const prefix = lang.split('-')[0];
-    if (locales[prefix]) return prefix;
+    const locale = resolveLocale(lang);
+    if (locale) return locale;
   }
   return FALLBACK_LOCALE;
 }
@@ -48,11 +57,11 @@ function detectBrowserLocale(): string {
  * 优先级：用户手动选择 > 浏览器语言 > 英文(fallback)
  */
 export async function initI18n(): Promise<string> {
-  let locale: string;
+  let locale: Locale;
 
   try {
     const result = await browser.storage.local.get(STORAGE_KEY);
-    locale = result[STORAGE_KEY] || detectBrowserLocale();
+    locale = resolveLocale(result[STORAGE_KEY]) ?? detectBrowserLocale();
   } catch {
     // 非扩展环境(如测试)直接使用浏览器检测
     locale = detectBrowserLocale();
@@ -66,22 +75,8 @@ export async function initI18n(): Promise<string> {
  * 设置当前语言
  */
 export function setLocale(locale: string): void {
-  // 精确匹配
-  if (locales[locale]) {
-    currentLocale = locale;
-    currentMessages = locales[locale];
-    return;
-  }
-  // 语言前缀匹配
-  const prefix = locale.split('-')[0];
-  if (locales[prefix]) {
-    currentLocale = prefix;
-    currentMessages = locales[prefix];
-    return;
-  }
-  // 回退到英文
-  currentLocale = FALLBACK_LOCALE;
-  currentMessages = locales[FALLBACK_LOCALE];
+  currentLocale = resolveLocale(locale) ?? FALLBACK_LOCALE;
+  currentMessages = locales[currentLocale];
 }
 
 /**
@@ -90,7 +85,7 @@ export function setLocale(locale: string): void {
 export async function saveLocale(locale: string): Promise<void> {
   setLocale(locale);
   try {
-    await browser.storage.local.set({ [STORAGE_KEY]: locale });
+    await browser.storage.local.set({ [STORAGE_KEY]: currentLocale });
   } catch {
     // 非扩展环境忽略
   }
@@ -114,7 +109,7 @@ export async function clearLocale(): Promise<void> {
 export async function getSavedLocale(): Promise<string | null> {
   try {
     const result = await browser.storage.local.get(STORAGE_KEY);
-    return result[STORAGE_KEY] || null;
+    return resolveLocale(result[STORAGE_KEY]);
   } catch {
     return null;
   }
@@ -123,8 +118,15 @@ export async function getSavedLocale(): Promise<string | null> {
 /**
  * 获取当前语言
  */
-export function getLocale(): string {
+export function getLocale(): Locale {
   return currentLocale;
+}
+
+/**
+ * 弹出窗口依次切换简体中文、繁体中文和英文。
+ */
+export function getNextLocale(): Locale {
+  return currentLocale === 'en' ? 'zh-CN' : currentLocale === 'zh-CN' ? 'zh-TW' : 'en';
 }
 
 /**
@@ -176,14 +178,7 @@ export function applyI18nToDOM(): void {
   });
 
   // 更新 html lang 属性
-  const langMap: Record<string, string> = {
-    'zh': 'zh-CN',
-    'zh-CN': 'zh-CN',
-    'zh-TW': 'zh-CN',
-    'zh-HK': 'zh-CN',
-    'en': 'en',
-  };
-  document.documentElement.lang = langMap[currentLocale] || 'en';
+  document.documentElement.lang = currentLocale;
 }
 
 export type { MessageKey };

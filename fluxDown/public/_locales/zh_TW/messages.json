@@ -1,0 +1,10 @@
+{
+  "extensionName": {
+    "message": "FluxDown",
+    "description": "The name of the extension"
+  },
+  "extensionDescription": {
+    "message": "攔截瀏覽器下載，傳送到 FluxDown 桌面應用程式以進行高速下載",
+    "description": "The description of the extension"
+  }
+}

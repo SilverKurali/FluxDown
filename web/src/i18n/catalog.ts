@@ -3,6 +3,7 @@
 
 import en from '@i18n-assets/en.json'
 import zh from '@i18n-assets/zh.json'
+import zhTW from '@i18n-assets/zh-TW.json'
 
 export type Params = Readonly<Record<string, string | number>>
 
@@ -12,6 +13,7 @@ export const FALLBACK_LOCALE = 'en'
 const TABLES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   en: en as Record<string, string>,
   zh: zh as Record<string, string>,
+  'zh-tw': zhTW as Record<string, string>,
 }
 
 function normalizeLocale(locale: string): string {
@@ -31,7 +33,12 @@ export const AVAILABLE_LOCALES: readonly string[] = Object.keys(TABLES).sort(
 export function resolveLocale(locale: string): string {
   const normalized = normalizeLocale(locale)
   if (normalized in TABLES) return normalized
-  const prefix = normalized.split('-')[0] ?? normalized
+  const [prefix = normalized, scriptOrRegion] = normalized.split('-')
+  if (prefix === 'zh') {
+    return scriptOrRegion === 'hant' || scriptOrRegion === 'tw' || scriptOrRegion === 'hk' || scriptOrRegion === 'mo'
+      ? 'zh-tw'
+      : 'zh'
+  }
   if (prefix in TABLES) return prefix
   for (const code of AVAILABLE_LOCALES) {
     if ((code.split('-')[0] ?? code) === prefix) return code

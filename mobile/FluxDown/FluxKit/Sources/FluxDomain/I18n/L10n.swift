@@ -1,6 +1,6 @@
 import Foundation
 
-/// 界面文案：直接读取仓库根 `assets/i18n/{en,zh}.json`（GPUI / Web / Android 共用的同一份基线，
+/// 界面文案：直接读取仓库根 `assets/i18n/{en,zh,zh-TW}.json`（GPUI / Web / Android 共用的同一份基线，
 /// 包内经 `Resources/i18n` 符号链接打包，Swift 侧不手写同名文案）。
 ///
 /// 语义对齐 `crates/i18n`：按 locale 查表，键缺失或值为空回退英文；`{name}` 占位按参数替换。
@@ -8,7 +8,7 @@ import Foundation
 public final class L10n: Sendable {
     public static let shared = L10n()
 
-    /// 当前语言代码（`en` / `zh`）。
+    /// 当前语言代码，与 JSON 文件名一致（如 `en` / `zh` / `zh-TW`）。
     public let locale: String
     private let table: [String: String]
     private let fallback: [String: String]
@@ -22,9 +22,9 @@ public final class L10n: Sendable {
 
     /// 测试用：指定语言。
     public init(locale: String) {
-        self.locale = locale
+        self.locale = Self.resolve(preferred: [locale], available: Self.availableLocales())
         fallback = Self.load("en")
-        table = locale == "en" ? fallback : Self.load(locale)
+        table = self.locale == "en" ? fallback : Self.load(self.locale)
     }
 
     /// 查表；缺键回退英文，再缺返回键名本身（便于发现漏键）。
@@ -51,10 +51,24 @@ public final class L10n: Sendable {
 
     static func resolve(preferred: [String], available: Set<String>) -> String {
         for language in preferred {
-            let code = language.lowercased()
-            if available.contains(code) { return code }
-            let base = String(code.split(separator: "-").first ?? "")
-            if available.contains(base) { return base }
+            let code = language.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "_", with: "-").lowercased()
+            // 保留实际文件名大小写，避免大小写敏感文件系统上的 zh-TW.json 加载失败。
+            if let exact = available.first(where: { $0.caseInsensitiveCompare(code) == .orderedSame }) { return exact }
+            let parts = code.split(separator: "-")
+            let base = String(parts.first ?? "")
+            if base == "zh" {
+                let chinese: String
+                switch parts.dropFirst().first {
+                case "hant", "tw", "hk", "mo": chinese = "zh-TW"
+                default: chinese = "zh"
+                }
+                if let match = available.first(where: { $0.caseInsensitiveCompare(chinese) == .orderedSame }) {
+                    return match
+                }
+                // 繁中资源缺失时仍遵循原有中文、英文回退顺序。
+            }
+            if let match = available.first(where: { $0.caseInsensitiveCompare(base) == .orderedSame }) { return match }
         }
         return "en"
     }
@@ -66,7 +80,7 @@ public final class L10n: Sendable {
     private static func availableLocales() -> Set<String> {
         guard let dir = directory(),
               let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return ["en"] }
-        return Set(files.filter { $0.hasSuffix(".json") }.map { String($0.dropLast(5)).lowercased() })
+        return Set(files.filter { $0.hasSuffix(".json") }.map { String($0.dropLast(5)) })
     }
 
     private static func load(_ locale: String) -> [String: String] {
