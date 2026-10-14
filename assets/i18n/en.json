@@ -2636,6 +2636,8 @@
   "mobileSaveDirNotWritable": "Can't write to \"{dir}\". Android only allows the app's own folder or a folder you pick with Browse.",
   "mobileUsePublicDownloadDir": "Use system Download/FluxDown",
   "mobileAllFilesDescNative": "Android only lets FluxDown write here with \"All files access\". Grant it in system settings, then choose the folder again. The app folder and Download/FluxDown work without it.",
+  "mobileStoragePermTitle": "Storage permission required",
+  "mobileStoragePermDesc": "On Android 10 and earlier, FluxDown needs the storage permission to write here (including Download/FluxDown). The folder is applied once you grant it. The app folder works without it.",
   "mobileAddDeviceCodeLoading": "Generating pairing code…",
   "mobileAddDeviceForeground": "Keep FluxDown open while pairing — this phone can only be reached while the app is in the foreground.",
   "mobileAddDeviceNoGatewayHint": "This phone has no network service other devices can connect to. To pair, enter the other device's address and pairing code below.",

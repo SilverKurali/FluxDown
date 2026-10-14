@@ -2636,6 +2636,8 @@
   "mobileSaveDirNotWritable": "无法写入「{dir}」。Android 只允许写入应用自己的目录，或通过「浏览」选择的文件夹。",
   "mobileUsePublicDownloadDir": "使用系统 Download/FluxDown",
   "mobileAllFilesDescNative": "Android 需要授予「所有文件访问」权限才能写入该目录。前往系统设置开启后重新选择即可；应用目录与 Download/FluxDown 无需该权限。",
+  "mobileStoragePermTitle": "需要存储权限",
+  "mobileStoragePermDesc": "Android 10 及以下需要授予存储权限才能写入该目录（包括 Download/FluxDown）。授权后会自动使用所选文件夹；应用目录无需该权限。",
   "mobileAddDeviceCodeLoading": "正在生成配对码…",
   "mobileAddDeviceForeground": "配对期间请保持 FluxDown 打开——手机仅在 App 位于前台时才能被连接。",
   "mobileAddDeviceNoGatewayHint": "本机没有可供其他设备连接的网络服务。请在下方输入对方设备的地址与配对码来完成配对。",
