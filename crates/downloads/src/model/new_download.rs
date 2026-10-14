@@ -81,8 +81,9 @@ fn url_file_segment(url: &str) -> Option<&str> {
 /// - 原始行以空格 / Tab 开头 = 选项行，附着到上一条（`out=` / `checksum=`）；
 /// - `#` 开头为注释，空行跳过；
 /// - 含 `magnet:?` / `ed2k://` 时从该位置截取到行尾；
-/// - 其余行：`loose` 为 true 时取行内首个 `http(s)/ftp` 链接并去掉尾部标点
-///   （TXT 导入），否则要求链接位于行首（手动输入）。
+/// - 其余行：`loose` 为 true 时取行内首个 `http(s)/ftp/thunder` 链接并去掉尾部标点
+///   （TXT 导入），否则要求链接位于行首（手动输入）。`thunder://` 原样保留，由引擎
+///   建任务时解出真实地址（#696）。
 pub(crate) fn parse_entries(text: &str, loose: bool) -> Vec<UrlEntry> {
     let mut entries = Vec::new();
     let mut current: Option<UrlEntry> = None;
@@ -112,7 +113,7 @@ pub(crate) fn parse_entries(text: &str, loose: bool) -> Vec<UrlEntry> {
         } else if let Some(index) = lower.find("ed2k://") {
             current = Some(UrlEntry::with_url(&trimmed[index..]));
         } else if loose {
-            if let Some(url) = find_http_url(trimmed) {
+            if let Some(url) = find_url(trimmed) {
                 let url = trim_url_tail(url);
                 if !url.is_empty() {
                     current = Some(UrlEntry::with_url(url));
@@ -128,9 +129,9 @@ pub(crate) fn parse_entries(text: &str, loose: bool) -> Vec<UrlEntry> {
     entries
 }
 
-/// `^(https?|ftp)://\S+`（忽略大小写）。
-fn leading_http_url(text: &str) -> Option<&str> {
-    let scheme = ["https://", "http://", "ftp://"]
+/// `^(https?|ftp|thunder)://\S+`（忽略大小写）。
+fn leading_url(text: &str) -> Option<&str> {
+    let scheme = ["https://", "http://", "ftp://", "thunder://"]
         .into_iter()
         .find(|scheme| {
             text.len() >= scheme.len()
@@ -145,7 +146,7 @@ fn leading_http_url(text: &str) -> Option<&str> {
 /// 照常请求，服务器据此命名，#131），所以链接已进入查询串时延伸到行尾或下一个链接
 /// 之前；没有查询串时空白之后的内容仍视为附注丢弃。
 fn leading_manual_url(text: &str) -> Option<&str> {
-    let head = leading_http_url(text)?;
+    let head = leading_url(text)?;
     if !head.contains('?') || head.len() == text.len() {
         return Some(head);
     }
@@ -159,20 +160,28 @@ fn leading_manual_url(text: &str) -> Option<&str> {
     Some(text[..end].trim_end())
 }
 
-/// 是否以可建任务的链接开头（`http(s)://` / `ftp://` / `magnet:?` / `ed2k://`，忽略大小写）。
+/// 是否以可建任务的链接开头（`http(s)://` / `ftp://` / `thunder://` / `magnet:?` /
+/// `ed2k://`，忽略大小写）。
 fn starts_with_link(text: &str) -> bool {
-    ["https://", "http://", "ftp://", "magnet:?", "ed2k://"]
-        .into_iter()
-        .any(|scheme| {
-            text.len() >= scheme.len()
-                && text.as_bytes()[..scheme.len()].eq_ignore_ascii_case(scheme.as_bytes())
-        })
+    [
+        "https://",
+        "http://",
+        "ftp://",
+        "thunder://",
+        "magnet:?",
+        "ed2k://",
+    ]
+    .into_iter()
+    .any(|scheme| {
+        text.len() >= scheme.len()
+            && text.as_bytes()[..scheme.len()].eq_ignore_ascii_case(scheme.as_bytes())
+    })
 }
 
-/// 行内首个 `(https?|ftp)://\S+` 匹配（忽略大小写）。
-fn find_http_url(line: &str) -> Option<&str> {
+/// 行内首个 `(https?|ftp|thunder)://\S+` 匹配（忽略大小写）。
+fn find_url(line: &str) -> Option<&str> {
     line.char_indices()
-        .find_map(|(index, _)| leading_http_url(&line[index..]))
+        .find_map(|(index, _)| leading_url(&line[index..]))
 }
 
 /// 去掉 URL 末尾常见标点（TXT 文本中 URL 后可能跟随句号 / 逗号等）。
@@ -613,6 +622,36 @@ mod tests {
         let entries = parse_entries("see https://a.example/x.zip). next\nnothing here\n", true);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].url, "https://a.example/x.zip");
+    }
+
+    /// #696：`thunder://` 迅雷链接与 http(s)/ftp 同等识别（解封装由引擎建任务时完成）。
+    #[test]
+    fn parse_accepts_thunder_links() {
+        let strict = parse_entries(
+            "thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=\n  out=c.zip\nTHUNDER://QUFodHRwOi8vYS5iL2QuemlwWlo= 迅雷\nhttps://a.example/x?q=1 2 thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=",
+            false,
+        );
+        assert_eq!(
+            strict,
+            vec![
+                UrlEntry {
+                    url: "thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=".to_owned(),
+                    file_name: "c.zip".to_owned(),
+                    ..UrlEntry::default()
+                },
+                UrlEntry {
+                    url: "THUNDER://QUFodHRwOi8vYS5iL2QuemlwWlo=".to_owned(),
+                    ..UrlEntry::default()
+                },
+                UrlEntry {
+                    url: "https://a.example/x?q=1 2".to_owned(),
+                    ..UrlEntry::default()
+                },
+            ]
+        );
+        let loose = parse_entries("迅雷：thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=.\n", true);
+        assert_eq!(loose.len(), 1);
+        assert_eq!(loose[0].url, "thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=");
     }
 
     #[test]
