@@ -5524,6 +5524,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     seeding_status,
                     seeding_message: seeding_message.to_string(),
                     seeding_time_secs: seed_time_base,
+                    deleted_tasks: Vec::new(),
                 })
                 .await
                 .is_err()
