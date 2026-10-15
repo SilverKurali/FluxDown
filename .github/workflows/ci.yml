@@ -193,6 +193,9 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci
+      - uses: oven-sh/setup-bun@v2
+      - run: bun test
+      - run: npm run typecheck
       - run: npm run build
       - run: npm run build:firefox
 

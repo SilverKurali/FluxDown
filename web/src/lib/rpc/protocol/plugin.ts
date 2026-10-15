@@ -34,7 +34,7 @@ export interface PluginDto {
   homepage: string;
   enabled: boolean;
   devMode: boolean;
-  /** `None` / `Manual` / `CircuitBreaker`。 */
+  /** `None` / `Manual` / `CircuitBreaker` / `Revoked`。 */
   disabledReason: string;
   settings: SettingFieldDto[];
   /** 当前设置值（key → 字符串）。 */
@@ -44,6 +44,8 @@ export interface PluginDto {
   /** 是否声明平台登录入口。 */
   authSupported: boolean;
   subscriptionProviderIds: string[];
+  /** manifest resolvers[0].match.urls（glob，供扩展判断页面是否可由插件解析）。 */
+  resolverUrls: string[];
   /** `Loaded` / `Failed`；与 `enabled` 独立。 */
   loadStatus: string;
   /** 加载失败原因；成功为空。 */

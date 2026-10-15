@@ -263,6 +263,7 @@ internal fun pluginBadges(plugin: PluginDto, update: MarketEntry?, yanked: Strin
     }
     if (plugin.disabledReason == "Manual") out += Badge(str(R.string.pluginDisabledManual), Tone.Neutral, FluxIcons.CirclePause)
     if (plugin.disabledReason == "CircuitBreaker") out += Badge(str(R.string.pluginDisabledCircuitBreaker), Tone.Coral, FluxIcons.ZapOff)
+    if (plugin.disabledReason == "Revoked") out += Badge(str(R.string.pluginDisabledRevoked), Tone.Coral, FluxIcons.ShieldAlert)
     val yankedRes = yanked?.let { yankedLabelRes(it) }
     if (yankedRes != null) {
         out += Badge(str(R.string.pluginInstalledVersionYanked, "label" to str(yankedRes)), Tone.Coral, FluxIcons.ShieldAlert)

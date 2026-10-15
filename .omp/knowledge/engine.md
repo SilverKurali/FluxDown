@@ -171,6 +171,8 @@
 
 **市场下载诊断与代理（2026-10-01 修复）**：`MarketClient` 复用 `downloader::build_client_builder`，索引与插件包继承应用的 None/System/Manual、代理认证与 `no_proxy` 规则；daemon 每次取最新下载配置，manager 使用当前已应用代理。每个源/镜像失败记录插件 ID、版本、域名/路径和完整根因链，URL 去除 userinfo/query/fragment。哈希不符或超限仍尝试后续镜像，最终保留内容验证错误而非统统折叠为网络失败；包下载的逐跳 HTTPS / 公网字面量 IP 守卫保持启用。官方索引发布规则在 `fluxdown-plugin-index`：分片/包 append-only、镜像固定到 commit、联网完整 GET/hash，历史 sequence 冲突只向高水位以上修复。
 
+**市场撤回强制执行**：daemon 处理 `daemon.plugin.market.list` 拉到索引后，把 `yanked` 为 `vulnerable` / `malicious` 的 `(plugin_id, version)` 交给 `PluginManager::apply_market_revocations`：命中的已装（非 dev）插件写 `enabled=false` + `disabled_reason=Revoked` + `plugin.<id>.revoked_version`，重载并发 `PluginAutoDisabled { reason: "Revoked" }`（客户端用 `pluginDisabledRevoked` 徽标 / `pluginRevokedToast`）；不再命中时只清 `revoked_version`、保持禁用。被撤回版本 `set_enabled(true)` 报错，安装不同版本时 `finish_install` 自动启用并清标记。agent `plugin_revocation.rs` 启动 120s 后每 24h 触发一次（有非 dev 插件才拉索引；daemon 无插件能力即退出；embedded 不启动）。
+
 **off-actor 惰性 resolve 接线**：`create_task` 命中 `match_resolver` → 落 `tasks.resolver_plugin_id`（仅存 ID）+ 跳过 meta_prober。`do_start/resume_task` 体首守卫：resolver 非空且未解析 → 占位 active_tasks + off-actor spawn → return。worker 经 `resolve_rx` 回流，actor `select!` 分支 `on_resolve_ready`（复查生命周期 → 用解析后 url 重算五路协议分派）。**宿主 actor 必须接线 `resolve_rx` + `plugin_retry_rx`**。
 
-**config 命名空间**：`plugin.<identity>.enabled`/`.disabled_reason`/`.setting.<key>`/`.kv.<key>`；`plugin.dev.<identity>`（devMode 路径）；`market.<index_id>.sequence`。identity 格式 `^[a-z0-9_-]+@[a-z0-9_-]+$`。
+**config 命名空间**：`plugin.<identity>.enabled`/`.disabled_reason`（`CircuitBreaker` / `Revoked`）/`.revoked_version`/`.setting.<key>`/`.kv.<key>`；`plugin.dev.<identity>`（devMode 路径）；`market.<index_id>.sequence`。identity 格式 `^[a-z0-9_-]+@[a-z0-9_-]+$`。

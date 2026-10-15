@@ -63,6 +63,7 @@ pub enum DisabledReason {
     None,
     Manual,
     CircuitBreaker,
+    Revoked,
 }
 
 impl DisabledReason {
@@ -71,12 +72,14 @@ impl DisabledReason {
             DisabledReason::None => "None",
             DisabledReason::Manual => "Manual",
             DisabledReason::CircuitBreaker => "CircuitBreaker",
+            DisabledReason::Revoked => "Revoked",
         }
     }
     pub fn parse(s: &str) -> Self {
         match s {
             "Manual" => DisabledReason::Manual,
             "CircuitBreaker" => DisabledReason::CircuitBreaker,
+            "Revoked" => DisabledReason::Revoked,
             _ => DisabledReason::None,
         }
     }
@@ -203,6 +206,8 @@ pub struct PluginInfo {
     pub auth_supported: bool,
     /// manifest 声明的订阅 provider ID；仅启用插件会被前端作为可选订阅来源展示。
     pub subscription_provider_ids: Vec<String>,
+    /// manifest resolvers[0].match.urls（glob，语义见 url_glob_match）。
+    pub resolver_urls: Vec<String>,
     /// 加载状态：`Loaded` 表示已通过启动时的 manifest/源码加载，`Failed` 表示
     /// 目录仍存在但加载失败。与 `enabled` 分离：手动禁用的插件仍可能已加载。
     pub load_status: String,
@@ -589,6 +594,7 @@ impl PluginManager {
             if !p.enabled {
                 let reason = match p.disabled_reason {
                     DisabledReason::CircuitBreaker => "已被熔断自动禁用",
+                    DisabledReason::Revoked => "已被插件市场撤回",
                     _ => "已被禁用",
                 };
                 return Err(PluginError::Runtime(format!(
@@ -1212,10 +1218,23 @@ impl PluginManager {
 
         // enabled 写入规则：
         // - 新装（无 enabled 键）或熔断 → enabled=1, reason=None（升级即解熔断）
+        // - 撤回且新版本不同于被撤回版本 → 同上并清除 revoked_version
         // - Manual → 维持 disabled 不动（不覆盖用户主动关闭）
-        if !has_enabled_key || reason == DisabledReason::CircuitBreaker {
+        let revoked_stale = reason == DisabledReason::Revoked && {
+            let revoked_version = self
+                .db
+                .get_config(&format!("plugin.{identity}.revoked_version"))
+                .await
+                .map_err(|e| PluginError::Runtime(e.to_string()))?;
+            revoked_version != self.installed_version(identity).await
+        };
+        if !has_enabled_key || reason == DisabledReason::CircuitBreaker || revoked_stale {
             self.write_enabled(identity, true, DisabledReason::None)
                 .await?;
+            self.db
+                .delete_config(&format!("plugin.{identity}.revoked_version"))
+                .await
+                .map_err(|e| PluginError::Runtime(e.to_string()))?;
         }
         // 最终重载让内存态与 config 一致。
         self.load_all().await;
@@ -1374,6 +1393,20 @@ impl PluginManager {
 
     /// 手动开关（写 enabled + disabled_reason）。
     pub async fn set_enabled(&self, identity: &str, enabled: bool) -> Result<(), PluginError> {
+        if enabled {
+            let revoked = self
+                .db
+                .get_config(&format!("plugin.{identity}.revoked_version"))
+                .await
+                .map_err(|e| PluginError::Runtime(e.to_string()))?;
+            if let Some(revoked) = revoked
+                && self.installed_version(identity).await.as_deref() == Some(revoked.as_str())
+            {
+                return Err(PluginError::Runtime(
+                    "该插件版本已被插件市场撤回，请升级后再启用".into(),
+                ));
+            }
+        }
         let reason = if enabled {
             DisabledReason::None
         } else {
@@ -1382,6 +1415,90 @@ impl PluginManager {
         self.write_enabled(identity, enabled, reason).await?;
         self.load_all().await;
         Ok(())
+    }
+
+    /// 当前已装版本：已加载插件优先，其次是带 manifest 的失败插件。
+    async fn installed_version(&self, identity: &str) -> Option<String> {
+        let loaded = self.plugins.read().await.clone();
+        if let Some(p) = loaded.iter().find(|p| p.manifest.identity == identity) {
+            return Some(p.manifest.version.clone());
+        }
+        let failed = self.failed_plugins.read().await.clone();
+        failed
+            .iter()
+            .find(|p| p.identity == identity)
+            .and_then(|p| p.manifest.as_ref().map(|m| m.version.clone()))
+    }
+
+    /// 按市场索引撤回已装插件：(identity, version) 命中即禁用（Revoked）并记录 revoked_version；
+    /// 已记录但不再命中的只清除 revoked_version（保持禁用，由用户手动启用）。返回是否有变化。
+    pub async fn apply_market_revocations(
+        &self,
+        revoked: &std::collections::HashSet<(String, String)>,
+    ) -> Result<bool, PluginError> {
+        let loaded = self.plugins.read().await.clone();
+        let failed = self.failed_plugins.read().await.clone();
+        let mut targets: Vec<(String, String)> = Vec::new();
+        for p in loaded.iter().filter(|p| !p.dev) {
+            targets.push((p.manifest.identity.clone(), p.manifest.version.clone()));
+        }
+        for p in failed.iter().filter(|p| !p.dev_mode) {
+            if let Some(manifest) = &p.manifest {
+                targets.push((p.identity.clone(), manifest.version.clone()));
+            }
+        }
+
+        let mut newly_revoked: Vec<String> = Vec::new();
+        let mut changed = false;
+        for (identity, version) in targets {
+            let key = format!("plugin.{identity}.revoked_version");
+            let recorded = self
+                .db
+                .get_config(&key)
+                .await
+                .map_err(|e| PluginError::Runtime(e.to_string()))?;
+            if revoked.contains(&(identity.clone(), version.clone())) {
+                let (enabled, reason) = self.plugin_state(&identity).await;
+                if !enabled
+                    && reason == DisabledReason::Revoked
+                    && recorded.as_deref() == Some(version.as_str())
+                {
+                    continue;
+                }
+                let values = std::collections::BTreeMap::from([
+                    (format!("plugin.{identity}.enabled"), "false".to_string()),
+                    (
+                        format!("plugin.{identity}.disabled_reason"),
+                        DisabledReason::Revoked.as_str().to_string(),
+                    ),
+                    (key, version),
+                ]);
+                self.db
+                    .set_config_batch_atomic(&values)
+                    .await
+                    .map_err(|e| PluginError::Runtime(e.to_string()))?;
+                newly_revoked.push(identity);
+                changed = true;
+            } else if recorded.is_some() {
+                self.db
+                    .delete_config(&key)
+                    .await
+                    .map_err(|e| PluginError::Runtime(e.to_string()))?;
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.load_all().await;
+        }
+        for identity in newly_revoked {
+            self.sink.emit(EngineEvent::PluginAutoDisabled {
+                identity: identity.clone(),
+                reason: DisabledReason::Revoked.as_str().to_string(),
+            });
+            log_info!("[plugin] {identity} 已被插件市场撤回，已自动禁用");
+        }
+        Ok(changed)
     }
 
     async fn write_enabled(
@@ -1536,6 +1653,12 @@ impl PluginManager {
                     .iter()
                     .map(|subscription| subscription.provider_id.clone())
                     .collect(),
+                resolver_urls: p
+                    .manifest
+                    .resolvers
+                    .first()
+                    .map(|r| r.match_decl.urls.clone())
+                    .unwrap_or_default(),
                 load_status: PluginLoadStatus::Loaded.as_str().to_string(),
                 load_error: String::new(),
             });
@@ -1597,6 +1720,12 @@ impl PluginManager {
                 permissions,
                 auth_supported,
                 subscription_provider_ids,
+                resolver_urls: p
+                    .manifest
+                    .as_ref()
+                    .and_then(|m| m.resolvers.first())
+                    .map(|r| r.match_decl.urls.clone())
+                    .unwrap_or_default(),
                 load_status: PluginLoadStatus::Failed.as_str().to_string(),
                 load_error: truncate_load_error(&p.error),
             });
@@ -2401,5 +2530,196 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_resolve_output(&res, false).is_err());
+    }
+
+    // ---- 市场撤回（Revoked）----
+
+    use super::PluginManager;
+    use crate::events::{EngineEvent, EventSink};
+    use crate::plugin::quickjs::QuickJsScriptRuntime;
+    use crate::plugin::runtime::{
+        BridgeHttpRequest, BridgeHttpResponse, PluginBridge, PluginLogLevel,
+    };
+    use std::collections::HashSet;
+
+    struct NullBridge;
+
+    #[async_trait::async_trait]
+    impl PluginBridge for NullBridge {
+        async fn http_request(
+            &self,
+            _plugin_id: &str,
+            _req: BridgeHttpRequest,
+        ) -> Result<BridgeHttpResponse, PluginError> {
+            Err(PluginError::Runtime("no network in test".to_string()))
+        }
+        async fn storage_get(&self, _plugin_id: &str, _key: &str) -> Option<String> {
+            None
+        }
+        async fn storage_set(
+            &self,
+            _plugin_id: &str,
+            _key: &str,
+            _value: String,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+        fn log(&self, _plugin_id: &str, _level: PluginLogLevel, _message: &str) {}
+        fn request_retry(&self, _task_id: &str, _delay_ms: u64) {}
+    }
+
+    #[derive(Default)]
+    struct CaptureSink(std::sync::Mutex<Vec<EngineEvent>>);
+
+    impl EventSink for CaptureSink {
+        fn emit(&self, event: EngineEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    const REVOKE_ID: &str = "acme@demo";
+
+    fn write_plugin(root: &std::path::Path, dir: &str, identity: &str, version: &str) {
+        let dir = root.join(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            format!(r#"{{"identity":"{identity}","name":"N","version":"{version}"}}"#),
+        )
+        .unwrap();
+    }
+
+    async fn revoke_fixture() -> (PluginManager, Arc<CaptureSink>, PathBuf) {
+        let root = std::env::temp_dir().join(format!("fluxdown-revoke-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        write_plugin(&root, REVOKE_ID, REVOKE_ID, "1.0.0");
+        let db = crate::db::Db::connect("sqlite::memory:").await.unwrap();
+        let sink = Arc::new(CaptureSink::default());
+        let manager = PluginManager::new(
+            Arc::new(QuickJsScriptRuntime::new(1).unwrap()),
+            Arc::new(NullBridge),
+            db,
+            root.clone(),
+            "1.0.0".to_string(),
+            sink.clone(),
+        );
+        manager.load_all().await;
+        (manager, sink, root)
+    }
+
+    fn revoked_set(identity: &str, version: &str) -> HashSet<(String, String)> {
+        HashSet::from([(identity.to_string(), version.to_string())])
+    }
+
+    async fn state_of(manager: &PluginManager) -> (bool, String) {
+        let info = manager
+            .list()
+            .await
+            .into_iter()
+            .find(|p| p.identity == REVOKE_ID)
+            .unwrap();
+        (info.enabled, info.disabled_reason)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn market_revocation_disables_plugin_and_emits_event() {
+        let (manager, sink, _root) = revoke_fixture().await;
+        assert_eq!(state_of(&manager).await, (true, "None".to_string()));
+
+        let changed = manager
+            .apply_market_revocations(&revoked_set(REVOKE_ID, "1.0.0"))
+            .await
+            .unwrap();
+        assert!(changed);
+        assert_eq!(state_of(&manager).await, (false, "Revoked".to_string()));
+        assert!(sink.0.lock().unwrap().iter().any(|event| matches!(
+            event,
+            EngineEvent::PluginAutoDisabled { identity, reason }
+                if identity == REVOKE_ID && reason == "Revoked"
+        )));
+
+        // 幂等：重复应用不再变化、不再发事件。
+        let again = manager
+            .apply_market_revocations(&revoked_set(REVOKE_ID, "1.0.0"))
+            .await
+            .unwrap();
+        assert!(!again);
+        assert_eq!(sink.0.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revoked_version_cannot_be_enabled() {
+        let (manager, _sink, _root) = revoke_fixture().await;
+        manager
+            .apply_market_revocations(&revoked_set(REVOKE_ID, "1.0.0"))
+            .await
+            .unwrap();
+        let error = manager.set_enabled(REVOKE_ID, true).await.unwrap_err();
+        assert!(error.to_string().contains("已被插件市场撤回"));
+        assert_eq!(state_of(&manager).await, (false, "Revoked".to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installing_newer_version_reenables_and_clears_marker() {
+        let (manager, _sink, root) = revoke_fixture().await;
+        manager
+            .apply_market_revocations(&revoked_set(REVOKE_ID, "1.0.0"))
+            .await
+            .unwrap();
+
+        write_plugin(&root, REVOKE_ID, REVOKE_ID, "1.1.0");
+        manager.finish_install(REVOKE_ID).await.unwrap();
+
+        assert_eq!(state_of(&manager).await, (true, "None".to_string()));
+        let marker = manager
+            .db
+            .get_config(&format!("plugin.{REVOKE_ID}.revoked_version"))
+            .await
+            .unwrap();
+        assert!(marker.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifted_revocation_clears_marker_but_stays_disabled() {
+        let (manager, _sink, _root) = revoke_fixture().await;
+        manager
+            .apply_market_revocations(&revoked_set(REVOKE_ID, "1.0.0"))
+            .await
+            .unwrap();
+
+        let changed = manager
+            .apply_market_revocations(&HashSet::new())
+            .await
+            .unwrap();
+        assert!(changed);
+        assert_eq!(state_of(&manager).await, (false, "Revoked".to_string()));
+        manager.set_enabled(REVOKE_ID, true).await.unwrap();
+        assert_eq!(state_of(&manager).await, (true, "None".to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dev_plugins_are_not_revoked() {
+        let (manager, sink, root) = revoke_fixture().await;
+        // 把已装目录换成 dev 登记：dev 覆盖同名安装目录。
+        let dev_dir = root.join(".dev-src");
+        write_plugin(&root, ".dev-src", REVOKE_ID, "1.0.0");
+        manager
+            .db
+            .set_config(
+                &format!("plugin.dev.{REVOKE_ID}"),
+                &dev_dir.to_string_lossy(),
+            )
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(root.join(REVOKE_ID)).unwrap();
+        manager.load_all().await;
+
+        let changed = manager
+            .apply_market_revocations(&revoked_set(REVOKE_ID, "1.0.0"))
+            .await
+            .unwrap();
+        assert!(!changed);
+        assert_eq!(state_of(&manager).await, (true, "None".to_string()));
+        assert!(sink.0.lock().unwrap().is_empty());
     }
 }

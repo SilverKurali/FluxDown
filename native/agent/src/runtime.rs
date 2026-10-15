@@ -299,6 +299,8 @@ pub(crate) async fn run_with(
         shell.clone(),
     ));
     let blobs = Arc::new(crate::capture::DaemonBlobClient::new(&daemon_config)?);
+    // 已装插件的市场撤回：低频触发 daemon 拉索引（桌面与 server 宿主；embedded 不接入）。
+    crate::plugin_revocation::spawn(daemon.clone(), cancel.clone());
     let nmh_task = if server.is_some() {
         // server 模式没有浏览器扩展中继：不启动 NMH IPC 也不注册 native messaging host；
         // 占位任务永不完成，退出时 abort。
@@ -307,7 +309,10 @@ pub(crate) async fn run_with(
         // NMH 需要实时速度（扩展弹窗）：自持一个任务事件泵，与网关的泵互不依赖。
         let task_events = crate::task_events::TaskEventHub::spawn(&events);
         let nmh = crate::nmh::NmhService::new(daemon.clone(), capture.clone())
-            .with_task_events(task_events);
+            .with_task_events(task_events)
+            .with_sniff_rules(Arc::new(crate::sniff_rules::SniffRuleStore::new(
+                store.data_dir().join("sniff-rules"),
+            )));
         let nmh_cancel = cancel.clone();
         let (endpoint_ready, endpoint_live) = tokio::sync::oneshot::channel();
         // 浏览器扩展靠 NMH 注册找到中继：端点开始监听后再按归属规则自愈，并存安装的中继

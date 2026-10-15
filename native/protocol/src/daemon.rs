@@ -719,7 +719,7 @@ pub struct PluginDto {
     pub homepage: String,
     pub enabled: bool,
     pub dev_mode: bool,
-    /// `None` / `Manual` / `CircuitBreaker`。
+    /// `None` / `Manual` / `CircuitBreaker` / `Revoked`。
     pub disabled_reason: String,
     pub settings: Vec<SettingFieldDto>,
     /// 当前设置值（key → value 字符串）。
@@ -733,6 +733,9 @@ pub struct PluginDto {
     /// manifest 声明的订阅 provider ID，供订阅创建界面生成可选来源。
     #[serde(default)]
     pub subscription_provider_ids: Vec<String>,
+    /// manifest resolvers[0].match.urls（glob，语义见 url_glob_match）。
+    #[serde(default)]
+    pub resolver_urls: Vec<String>,
     /// `Loaded` / `Failed`；与 `enabled` 独立，手动禁用的插件仍可能已加载。
     #[serde(default = "default_plugin_load_status")]
     pub load_status: String,
@@ -1790,7 +1793,8 @@ pub enum WsServerMsg {
     },
     /// `ping` 应答（RTT 测量）。
     Pong {},
-    /// 插件因熔断（连续超时/过载）被自动禁用（`reason` 固定 `"CircuitBreaker"`）。
+    /// 插件被自动禁用：`reason` 为 `"CircuitBreaker"`（连续超时/过载熔断）或
+    /// `"Revoked"`（被插件市场撤回）。
     PluginAutoDisabled { identity: String, reason: String },
     /// BT 重复添加：新任务的 info-hash 已被 `existingTaskId` 持有，占位任务
     /// （`taskId`）已被引擎删除。客户端据此提示用户；`existingName` 可能为空。

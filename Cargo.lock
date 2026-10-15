@@ -2875,6 +2875,7 @@ dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
  "directories",
+ "ed25519-dalek",
  "flate2",
  "fluxdown_api",
  "fluxdown_link",

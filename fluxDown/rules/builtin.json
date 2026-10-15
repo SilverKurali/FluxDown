@@ -1,0 +1,777 @@
+{
+  "format": "fluxdown-sniff-pack",
+  "packId": "builtin",
+  "sequence": 1,
+  "engine": 1,
+  "issuedAt": "2026-10-15T00:00:00Z",
+  "rules": [
+    {
+      "id": "builtin.ext.video",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "mp4",
+          "mkv",
+          "avi",
+          "mov",
+          "wmv",
+          "flv",
+          "webm",
+          "ts",
+          "m4v",
+          "3gp",
+          "mpg",
+          "mpeg",
+          "f4v",
+          "vob",
+          "ogv"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "video"
+      }
+    },
+    {
+      "id": "builtin.ext.audio",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "mp3",
+          "flac",
+          "wav",
+          "aac",
+          "ogg",
+          "wma",
+          "m4a",
+          "opus",
+          "ape",
+          "alac",
+          "aiff"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "audio"
+      }
+    },
+    {
+      "id": "builtin.ext.document",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "pdf",
+          "doc",
+          "docx",
+          "xls",
+          "xlsx",
+          "ppt",
+          "pptx",
+          "txt",
+          "rtf",
+          "epub",
+          "mobi",
+          "csv",
+          "odt",
+          "ods",
+          "odp"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "document"
+      }
+    },
+    {
+      "id": "builtin.ext.archive",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "zip",
+          "rar",
+          "7z",
+          "tar",
+          "gz",
+          "bz2",
+          "xz",
+          "iso",
+          "img",
+          "zst",
+          "lz",
+          "cab",
+          "z"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "archive"
+      }
+    },
+    {
+      "id": "builtin.ext.image",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 20,
+      "requires": "sniffImages",
+      "match": {
+        "ext": [
+          "jpg",
+          "jpeg",
+          "png",
+          "gif",
+          "webp",
+          "svg",
+          "bmp",
+          "ico",
+          "tiff",
+          "psd",
+          "raw",
+          "heic",
+          "avif"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "image"
+      }
+    },
+    {
+      "id": "builtin.ext.executable",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "exe",
+          "msi",
+          "dmg",
+          "deb",
+          "rpm",
+          "appimage",
+          "apk",
+          "ipa",
+          "snap",
+          "flatpak"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "executable"
+      }
+    },
+    {
+      "id": "builtin.ext.torrent",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "torrent"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "torrent"
+      }
+    },
+    {
+      "id": "builtin.ext.stream",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "m3u8",
+          "m3u",
+          "mpd",
+          "m4s"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "stream"
+      }
+    },
+    {
+      "id": "builtin.ext.subtitle",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "vtt",
+          "srt",
+          "ass",
+          "ssa",
+          "sub",
+          "idx",
+          "sup",
+          "lrc"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "subtitle"
+      }
+    },
+    {
+      "id": "builtin.mime.video",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 10,
+      "match": {
+        "mime": [
+          "video/*"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "video"
+      }
+    },
+    {
+      "id": "builtin.mime.audio",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 10,
+      "match": {
+        "mime": [
+          "audio/*"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "audio"
+      }
+    },
+    {
+      "id": "builtin.mime.stream",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 11,
+      "match": {
+        "mime": [
+          "application/vnd.apple.mpegurl",
+          "application/x-mpegurl",
+          "application/mpegurl",
+          "application/octet-stream-m3u8",
+          "application/dash+xml",
+          "application/m4s"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "stream"
+      }
+    },
+    {
+      "id": "builtin.mime.image",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 10,
+      "requires": "sniffImages",
+      "match": {
+        "mime": [
+          "image/*"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "image"
+      }
+    },
+    {
+      "id": "builtin.mime.classify.document",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 10,
+      "classifyOnly": true,
+      "match": {
+        "mime": [
+          "application/pdf",
+          "application/msword",
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "application/vnd.ms-excel",
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "application/vnd.ms-powerpoint",
+          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          "application/epub+zip",
+          "text/csv",
+          "application/vnd.openxmlformats-officedocument.*",
+          "application/vnd.ms-*"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "document"
+      }
+    },
+    {
+      "id": "builtin.mime.classify.archive",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 10,
+      "classifyOnly": true,
+      "match": {
+        "mime": [
+          "application/zip",
+          "application/x-rar-compressed",
+          "application/x-7z-compressed",
+          "application/gzip",
+          "application/x-tar",
+          "application/x-bzip2",
+          "application/x-xz",
+          "application/x-iso9660-image",
+          "application/zstd"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "archive"
+      }
+    },
+    {
+      "id": "builtin.mime.classify.executable",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 10,
+      "classifyOnly": true,
+      "match": {
+        "mime": [
+          "application/x-msdownload",
+          "application/x-msi",
+          "application/vnd.android.package-archive",
+          "application/x-apple-diskimage",
+          "application/vnd.debian.binary-package"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "executable"
+      }
+    },
+    {
+      "id": "builtin.mime.classify.torrent",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 10,
+      "classifyOnly": true,
+      "match": {
+        "mime": [
+          "application/x-bittorrent"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "torrent"
+      }
+    },
+    {
+      "id": "builtin.mime.classify.subtitle",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 10,
+      "classifyOnly": true,
+      "match": {
+        "mime": [
+          "text/vtt",
+          "application/x-subrip",
+          "text/x-ssa",
+          "text/x-ass",
+          "application/x-subtitle"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "subtitle"
+      }
+    },
+    {
+      "id": "builtin.noise.substr",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 30,
+      "exclude": [
+        {
+          "attachment": true
+        }
+      ],
+      "match": {
+        "url": [
+          "*google-analytics.com*",
+          "*googletagmanager.com*",
+          "*analytics.google.com*",
+          "*doubleclick.net*",
+          "*googlesyndication.com*",
+          "*googleadservices.com*",
+          "*google.com/pagead*",
+          "*facebook.com/tr*",
+          "*connect.facebook.net*",
+          "*fbcdn.net/signals*",
+          "*hotjar.com*",
+          "*clarity.ms*",
+          "*mixpanel.com*",
+          "*segment.io*",
+          "*segment.com*",
+          "*amplitude.com*",
+          "*sentry.io*",
+          "*bugsnag.com*",
+          "*newrelic.com*",
+          "*nr-data.net*",
+          "*adsense*",
+          "*adservice*",
+          "*ad.doubleclick*",
+          "*moat.com*",
+          "*adsrvr.org*",
+          "*advertising.com*",
+          "*criteo.com*",
+          "*outbrain.com*",
+          "*taboola.com*",
+          "*adnxs.com*",
+          "*cdn.mxpnl.com*",
+          "*stats.wp.com*",
+          "*pixel.wp.com*",
+          "*bat.bing.com*",
+          "*sb.scorecardresearch.com*",
+          "*b.scorecardresearch.com*"
+        ]
+      },
+      "action": {
+        "kind": "ignore"
+      }
+    },
+    {
+      "id": "builtin.noise.hosts",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 30,
+      "match": {
+        "host": [
+          "=www.google-analytics.com",
+          "=ssl.google-analytics.com",
+          "=stats.g.doubleclick.net",
+          "=cm.g.doubleclick.net",
+          "=pixel.facebook.com",
+          "=www.facebook.com",
+          "=tr.snapchat.com",
+          "=analytics.tiktok.com",
+          "=analytics.twitter.com"
+        ]
+      },
+      "action": {
+        "kind": "ignore"
+      }
+    },
+    {
+      "id": "builtin.noise.paths",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 30,
+      "exclude": [
+        {
+          "ext": [
+            "mp4",
+            "mkv",
+            "avi",
+            "mov",
+            "wmv",
+            "flv",
+            "webm",
+            "ts",
+            "m4v",
+            "3gp",
+            "mpg",
+            "mpeg",
+            "f4v",
+            "vob",
+            "ogv",
+            "mp3",
+            "flac",
+            "wav",
+            "aac",
+            "ogg",
+            "wma",
+            "m4a",
+            "opus",
+            "ape",
+            "alac",
+            "aiff",
+            "pdf",
+            "doc",
+            "docx",
+            "xls",
+            "xlsx",
+            "ppt",
+            "pptx",
+            "txt",
+            "rtf",
+            "epub",
+            "mobi",
+            "csv",
+            "odt",
+            "ods",
+            "odp",
+            "zip",
+            "rar",
+            "7z",
+            "tar",
+            "gz",
+            "bz2",
+            "xz",
+            "iso",
+            "img",
+            "zst",
+            "lz",
+            "cab",
+            "z",
+            "exe",
+            "msi",
+            "dmg",
+            "deb",
+            "rpm",
+            "appimage",
+            "apk",
+            "ipa",
+            "snap",
+            "flatpak",
+            "torrent",
+            "m3u8",
+            "m3u",
+            "mpd",
+            "m4s",
+            "vtt",
+            "srt",
+            "ass",
+            "ssa",
+            "sub",
+            "idx",
+            "sup",
+            "lrc"
+          ]
+        },
+        {
+          "attachment": true
+        }
+      ],
+      "match": {
+        "pathRegex": "/(?:api/v\\d+(?:/|$)|graphql(?:/|$)|_next/static/|static/(?:js|css|media)/|assets/fonts/|fonts/|favicon[^/]*$|sw\\.js$|workbox-[^/]*$|manifest\\.json$|robots\\.txt$|sitemap[^/]*$|__/|(?:beacon|collect|pixel|track|log|telemetry)(?:\\.[a-z0-9]{1,32})?(?:/|$))"
+      },
+      "action": {
+        "kind": "ignore"
+      }
+    },
+    {
+      "id": "builtin.noise.api",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "response",
+      "priority": 30,
+      "exclude": [
+        {
+          "attachment": true
+        }
+      ],
+      "match": {
+        "pathRegex": "/graphql(?:/|$)",
+        "hasExt": false
+      },
+      "action": {
+        "kind": "ignore"
+      }
+    },
+    {
+      "id": "builtin.normalize.strip",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "normalize",
+      "match": {},
+      "action": {
+        "kind": "strip-params",
+        "params": [
+          "_",
+          "__",
+          "t",
+          "ts",
+          "timestamp",
+          "v",
+          "ver",
+          "version",
+          "cache",
+          "cb",
+          "nocache",
+          "rand",
+          "random",
+          "r",
+          "bust",
+          "token",
+          "auth",
+          "signature",
+          "sig",
+          "sign",
+          "expire",
+          "expires",
+          "e",
+          "st",
+          "nva",
+          "nvb",
+          "utm_source",
+          "utm_medium",
+          "utm_campaign",
+          "utm_term",
+          "utm_content",
+          "fbclid",
+          "gclid",
+          "msclkid",
+          "twclid",
+          "ref",
+          "referer",
+          "referrer",
+          "source",
+          "start",
+          "end",
+          "begin",
+          "offset",
+          "sq",
+          "rn",
+          "rbuf"
+        ]
+      }
+    },
+    {
+      "id": "builtin.normalize.query-ext",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "normalize",
+      "match": {},
+      "action": {
+        "kind": "filename",
+        "extFromQuery": [
+          "format",
+          "ext",
+          "fm"
+        ]
+      }
+    },
+    {
+      "id": "builtin.track.bilibili",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "track",
+      "match": {
+        "host": [
+          "bilibili.com",
+          "bilivideo.com",
+          "bilivideo.cn",
+          "acgvideo.com"
+        ]
+      },
+      "action": {
+        "kind": "track",
+        "source": "filenameOrUrl",
+        "pattern": "[-_](\\d{4,6})\\.m4s(?:[?#]|$)",
+        "group": 1,
+        "audio": [
+          "30216",
+          "30232",
+          "30280",
+          "30250",
+          "30251"
+        ],
+        "fallback": "video"
+      }
+    },
+    {
+      "id": "builtin.track.bilibili-page",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "track",
+      "match": {
+        "pageHost": [
+          "bilibili.com",
+          "bilivideo.com",
+          "bilivideo.cn",
+          "acgvideo.com"
+        ]
+      },
+      "action": {
+        "kind": "track",
+        "source": "filenameOrUrl",
+        "pattern": "[-_](\\d{4,6})\\.m4s(?:[?#]|$)",
+        "group": 1,
+        "audio": [
+          "30216",
+          "30232",
+          "30280",
+          "30250",
+          "30251"
+        ],
+        "fallback": "video"
+      }
+    },
+    {
+      "id": "builtin.extract.lanzou",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "body",
+      "match": {
+        "url": [
+          "*/ajaxm.php*"
+        ]
+      },
+      "action": {
+        "kind": "extract",
+        "when": [
+          {
+            "path": "zt",
+            "equals": 1
+          }
+        ],
+        "fields": {
+          "dom": "dom",
+          "url": "url",
+          "name": "inf"
+        },
+        "emit": {
+          "mode": "preempt",
+          "url": {
+            "resolve": {
+              "base": "${dom}",
+              "ref": "${url}",
+              "bareQueryPrefix": "/file/"
+            }
+          },
+          "filename": "${name}"
+        }
+      }
+    }
+  ]
+}

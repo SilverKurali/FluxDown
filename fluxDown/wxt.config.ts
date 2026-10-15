@@ -5,6 +5,10 @@ export default defineConfig({
   // 曾因同名导出触发 "Duplicated imports" 警告；全项目已改为显式导入
   // （browser 来自 wxt/browser，define* 来自 wxt/utils/*），不再需要魔法全局。
   imports: false,
+  // UI 使用 Preact：esbuild 的 automatic JSX 运行时指向 preact/jsx-runtime。
+  vite: () => ({
+    esbuild: { jsx: "automatic", jsxImportSource: "preact" },
+  }),
   zip: {
     excludeSources: ["*.zip", "*.html", "stats.html"],
   },
@@ -63,12 +67,18 @@ export default defineConfig({
       "contextMenus",
     ],
     host_permissions: ["<all_urls>"],
-    web_accessible_resources: [
-      {
-        resources: ["/fetch-interceptor.js"],
-        matches: ["<all_urls>"],
-      },
-    ],
+    // 仅 Firefox：sensor 以 injectScript 注入 /page-hooks-main.js（MV2 无 world: MAIN）。
+    // Chrome 由 page-hooks.content.ts 直接以 MAIN world 注入，无需暴露任何资源。
+    ...(browser === "firefox"
+      ? {
+          web_accessible_resources: [
+            {
+              resources: ["/page-hooks-main.js"],
+              matches: ["<all_urls>"],
+            },
+          ],
+        }
+      : {}),
     action: {
       default_icon: {
         16: "/icon/16.png",

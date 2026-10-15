@@ -843,6 +843,21 @@ impl DaemonService {
                     .fetch_index()
                     .await
                     .map_err(|error| market_error(&error))?;
+                // 被标记 vulnerable / malicious 的版本：已装的同版本插件强制禁用。
+                let revoked: std::collections::HashSet<(String, String)> = index
+                    .entries
+                    .iter()
+                    .filter(|entry| matches!(entry.yanked.as_str(), "vulnerable" | "malicious"))
+                    .map(|entry| (entry.plugin_id.clone(), entry.version.clone()))
+                    .collect();
+                let changed = self
+                    .plugin_manager()?
+                    .apply_market_revocations(&revoked)
+                    .await
+                    .map_err(|error| internal_error(format!("{error:#}")))?;
+                if changed {
+                    self.publish_plugins().await?;
+                }
                 to_value(
                     index
                         .entries

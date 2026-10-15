@@ -1,18 +1,14 @@
 /**
  * 将嗅探到的原始媒体请求投影为用户真正能理解的「视频候选」。
  *
- * resource-store 保留原始请求，便于认证信息恢复和高级诊断；本模块只负责
+ * background/tab-state 保留原始请求，便于认证信息恢复和高级诊断；本模块只负责
  * UI/下载层的聚合，不把 m4s/ts 分片伪装成独立视频。
  */
 
 import type { DashManifest } from "./dash-manifest";
 import type { DetectedResource } from "./resource-types";
-import {
-  extractExtension,
-  extractFilenameFromUrl,
-  isStreamingUrl,
-  normalizeUrlForDedup,
-} from "./resource-types";
+import { extractFilenameFromUrl, isStreamingUrl } from "./resource-types";
+import { extractExtension } from "@/rules/url";
 import { normalizeDashManifest } from "./dash-manifest";
 
 export type MediaCandidateSource =
@@ -63,10 +59,8 @@ export interface MediaCandidateOptions {
   /** Localized label used when multiple candidates share one page title. */
   videoLabel?: string;
   manifests?: DashManifestEntry[];
-}
-
-function urlKey(url: string): string {
-  return normalizeUrlForDedup(url);
+  /** URL 去重键（调用方传入 `engine.dedupeKey` 的闭包）。 */
+  key: (url: string) => string;
 }
 
 /**
@@ -84,7 +78,7 @@ function stableMediaPath(url: string): string {
     parsed.hash = "";
     return parsed.toString();
   } catch {
-    return urlKey(url);
+    return url;
   }
 }
 
@@ -101,7 +95,7 @@ function mediaPathKey(url: string): string {
     const pathname = parsed.pathname.replace(/\/+$/, "");
     return pathname || "/";
   } catch {
-    return urlKey(url);
+    return url;
   }
 }
 
@@ -134,7 +128,7 @@ function isManifestUrl(url: string, mimeType?: string): boolean {
 
 function isCompleteFragmentResource(resource: DetectedResource): boolean {
   if (!isFragmentUrl(resource.url)) return false;
-  // resource-store 会用 URL 基名补全 filename，所以 filename 非空并不代表服务器
+  // tab-state 入库时会用 URL 基名补全 filename，所以 filename 非空并不代表服务器
   // 给了 Content-Disposition 文件名；只有与 URL 基名不同的名字才算显式信号。
   // 无显式名字的媒体，超大响应也不是普通 MSE 分片。
   const filename = resource.filename?.trim();
@@ -317,6 +311,7 @@ function manifestPeriods(manifest: DashManifest): Array<{
 }
 
 function relatedManifestResources(
+  urlKey: (url: string) => string,
   resources: DetectedResource[],
   manifestUrl: string,
   manifest: DashManifest,
@@ -412,6 +407,7 @@ export function buildMediaCandidates(
   resources: DetectedResource[],
   options: MediaCandidateOptions,
 ): MediaCandidate[] {
+  const urlKey = options.key;
   const mediaResources = resources.filter(
     (resource) =>
       resource.type === "video" ||
@@ -479,6 +475,7 @@ export function buildMediaCandidates(
       : undefined;
     const related = entry.url
       ? relatedManifestResources(
+        urlKey,
         mediaResources,
         entry.url,
         entry.manifest,
@@ -552,6 +549,7 @@ export function buildMediaCandidates(
   // 条不可下载的内部候选，既消费其原始资源，也让调试日志保留关联关系。
   for (const { entry, manifestKey } of ignoredManifestItems) {
     const related = relatedManifestResources(
+      urlKey,
       mediaResources,
       entry.url,
       entry.manifest,

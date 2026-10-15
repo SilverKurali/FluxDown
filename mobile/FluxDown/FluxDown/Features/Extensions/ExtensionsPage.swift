@@ -303,6 +303,9 @@ struct PluginRow: View {
             if plugin.disabledReason == "CircuitBreaker" {
                 StatusBadge(text: L("pluginDisabledCircuitBreaker"), tone: .failure, systemImage: FluxSymbol.cancelBoost)
             }
+            if plugin.disabledReason == "Revoked" {
+                StatusBadge(text: L("pluginDisabledRevoked"), tone: .failure, systemImage: "exclamationmark.octagon.fill")
+            }
             if let yanked, let key = PluginMarket.yankedLabelKey(yanked) {
                 StatusBadge(text: L("pluginInstalledVersionYanked", ["label": L(key)]), tone: .failure, systemImage: "exclamationmark.octagon.fill")
             }

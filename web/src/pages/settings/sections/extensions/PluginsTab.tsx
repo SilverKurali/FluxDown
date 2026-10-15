@@ -284,6 +284,7 @@ function PluginRow({
             {loadFailed ? <Badge tone="destructive">{t('pluginLoadStatusFailed')}</Badge> : <Badge>{t('pluginLoadStatusLoaded')}</Badge>}
             {plugin.disabledReason === 'Manual' ? <Badge>{t('pluginDisabledManual')}</Badge> : null}
             {plugin.disabledReason === 'CircuitBreaker' ? <Badge tone="destructive">{t('pluginDisabledCircuitBreaker')}</Badge> : null}
+            {plugin.disabledReason === 'Revoked' ? <Badge tone="destructive">{t('pluginDisabledRevoked')}</Badge> : null}
           </div>
           {plugin.homepage ? <ExtLink href={plugin.homepage} /> : null}
           {plugin.description ? <div className="line-clamp-2 break-words text-xs text-muted-foreground">{plugin.description}</div> : null}

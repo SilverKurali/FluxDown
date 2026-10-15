@@ -382,6 +382,13 @@ impl ExtensionsView {
                     frame,
                 )
             }),
+            (plugin.disabled_reason == "Revoked").then(|| {
+                ui::tone_pill(
+                    translator.text("pluginDisabledRevoked").to_owned(),
+                    destructive,
+                    frame,
+                )
+            }),
             yanked
                 .and_then(|yanked| yanked_label(translator, yanked))
                 .map(|label| {

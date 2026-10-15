@@ -200,6 +200,7 @@ mod tests {
             permissions: permissions.iter().map(|p| (*p).to_owned()).collect(),
             auth_supported: false,
             subscription_provider_ids: Vec::new(),
+            resolver_urls: Vec::new(),
             load_status: "Loaded".to_owned(),
             load_error: String::new(),
         }

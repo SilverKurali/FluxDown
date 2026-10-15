@@ -1,16 +1,31 @@
 import { describe, expect, test } from "bun:test";
 import {
-  buildMediaCandidates,
+  buildMediaCandidates as buildMediaCandidatesRaw,
   candidateFilename,
   countMediaCandidateRows,
   isMediaCandidateVisible,
   selectQualityVideoTracks,
 } from "./media-candidates";
+import type { MediaCandidateOptions } from "./media-candidates";
+import { compileBuiltin } from "@/rules/engine";
 import { parseDashXml } from "./dash-manifest";
 import type { DashManifest } from "./dash-manifest";
 import type { DetectedResource } from "./resource-types";
 
 const PAGE_URL = "https://example.com/watch";
+const rules = compileBuiltin();
+
+/** 测试里统一用内置规则的 dedupeKey 作为 URL 键。 */
+function buildMediaCandidates(
+  resources: DetectedResource[],
+  options: Omit<MediaCandidateOptions, "key">,
+) {
+  return buildMediaCandidatesRaw(resources, {
+    ...options,
+    key: (url) => rules.dedupeKey(url, PAGE_URL),
+  });
+}
+
 
 let sequence = 0;
 function resource(overrides: Partial<DetectedResource>): DetectedResource {

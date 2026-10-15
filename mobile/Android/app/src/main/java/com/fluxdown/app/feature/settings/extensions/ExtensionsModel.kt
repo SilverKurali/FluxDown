@@ -425,7 +425,8 @@ internal fun PluginAutoDisabledEffect(env: ExtensionsEnv) {
             if (notice.name != HostNotice.pluginAutoDisabled) return@collect
             val payload = PluginAutoDisabledNotice.fromJson(Json.parseOrNull(notice.json)) ?: return@collect
             val name = latest.firstOrNull { it.identity == payload.identity }?.name ?: payload.identity
-            env.toast(env.text(R.string.pluginAutoDisabledToast, "name" to name), FluxToastKind.Warn)
+            val toastKey = if (payload.reason == "Revoked") R.string.pluginRevokedToast else R.string.pluginAutoDisabledToast
+            env.toast(env.text(toastKey, "name" to name), FluxToastKind.Warn)
         }
     }
 }

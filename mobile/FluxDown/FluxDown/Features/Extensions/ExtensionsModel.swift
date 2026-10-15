@@ -388,7 +388,8 @@ struct PluginAutoDisabledToasts: ViewModifier {
         for notice in pending where notice.name == HostNoticeName.pluginAutoDisabled {
             guard let payload = notice.decode(PluginAutoDisabledNotice.self) else { continue }
             let name = known.first { $0.identity == payload.identity }?.name ?? payload.identity
-            container.toasts.show(text: L("pluginAutoDisabledToast", ["name": name]), tone: .warning)
+            let toastKey = payload.reason == "Revoked" ? "pluginRevokedToast" : "pluginAutoDisabledToast"
+            container.toasts.show(text: L(toastKey, ["name": name]), tone: .warning)
         }
     }
 }

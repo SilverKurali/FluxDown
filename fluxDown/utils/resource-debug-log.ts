@@ -16,7 +16,7 @@ import type {
 } from "./media-candidates";
 import { countMediaCandidateRows } from "./media-candidates";
 import type { DetectedResource } from "./resource-types";
-import { normalizeUrlForDedup } from "./resource-types";
+export type DebugUrlKey = (url: string) => string;
 
 export interface ResourceDebugLogOptions {
   resources: DetectedResource[];
@@ -25,7 +25,9 @@ export interface ResourceDebugLogOptions {
   tabId?: number;
   pageUrl?: string;
   pageTitle?: string;
-  source: "popup" | "content";
+  source: "popup" | "content" | "sidepanel";
+  /** URL 去重键（`engine.dedupeKey` 的闭包），由调用方传入。 */
+  key: DebugUrlKey;
 }
 
 const SENSITIVE_QUERY_KEYS = new Set([
@@ -108,8 +110,8 @@ export function redactUrl(url: string | undefined): string {
   }
 }
 
-function canonicalUrl(url: string | undefined): string {
-  return url ? normalizeUrlForDedup(redactUrl(url)) : "";
+function canonicalOf(key: DebugUrlKey, url: string | undefined): string {
+  return url ? key(redactUrl(url)) : "";
 }
 
 function timestampIso(value: number): string | undefined {
@@ -121,11 +123,11 @@ function timestampIso(value: number): string | undefined {
   }
 }
 
-function debugTrack(track: DashManifest["video"][number]) {
+function debugTrack(track: DashManifest["video"][number], key: DebugUrlKey) {
   return {
     id: track.id,
     url: redactUrl(track.url),
-    canonicalUrl: canonicalUrl(track.url),
+    canonicalUrl: canonicalOf(key, track.url),
     mimeType: track.mimeType,
     codecs: track.codecs,
     bandwidth: track.bandwidth,
@@ -135,14 +137,14 @@ function debugTrack(track: DashManifest["video"][number]) {
   };
 }
 
-function debugVariant(variant: MediaCandidateVariant) {
+function debugVariant(variant: MediaCandidateVariant, key: DebugUrlKey) {
   return {
     id: variant.id,
     label: variant.label,
     videoUrl: redactUrl(variant.videoUrl),
-    canonicalVideoUrl: canonicalUrl(variant.videoUrl),
+    canonicalVideoUrl: canonicalOf(key, variant.videoUrl),
     audioUrl: redactUrl(variant.audioUrl),
-    canonicalAudioUrl: canonicalUrl(variant.audioUrl),
+    canonicalAudioUrl: canonicalOf(key, variant.audioUrl),
     mimeType: variant.mimeType,
     bandwidth: variant.bandwidth,
     codec: variant.codec,
@@ -151,8 +153,62 @@ function debugVariant(variant: MediaCandidateVariant) {
   };
 }
 
+type DebugTrack = ReturnType<typeof debugTrack>;
+type DebugVariant = ReturnType<typeof debugVariant>;
+
+/** 资源调试日志快照（可 JSON 序列化；URL 已脱敏）。 */
+export interface ResourceDebugLog {
+  format: "fluxdown-resource-debug";
+  schemaVersion: 1;
+  exportedAt: string;
+  source: ResourceDebugLogOptions["source"];
+  context: { tabId: number | undefined; pageUrl: string; pageTitle: string };
+  summary: {
+    rawResourceCount: number;
+    rawMediaResourceCount: number;
+    manifestCount: number;
+    candidateCount: number;
+    downloadableCandidateCount: number;
+    representedRawResourceCount: number;
+    displayedRowCount: number;
+  };
+  resources: Array<{
+    id: string;
+    url: string;
+    canonicalUrl: string;
+    ruleIds: string[] | undefined;
+    finalUrl: string;
+    canonicalFinalUrl: string;
+    filename: string;
+    type: DetectedResource["type"];
+    size: number;
+    mimeType: string | undefined;
+    quality: string | undefined;
+    detectedBy: DetectedResource["detectedBy"];
+    detectedAt: number;
+    detectedAtIso: string | undefined;
+    tabId: number;
+    pageUrl: string;
+    confidence: DetectedResource["confidence"];
+    isAttachment: boolean | undefined;
+    auth: { hasCookies: boolean; headerNames: string[] };
+  }>;
+  manifests: Array<{ url: string; canonicalUrl: string; video: DebugTrack[]; audio: DebugTrack[] }>;
+  candidates: Array<{
+    id: string;
+    title: string;
+    type: MediaCandidate["type"];
+    source: MediaCandidate["source"];
+    pageUrl: string;
+    downloadable: boolean;
+    fragmentCount: number;
+    rawResourceIds: string[];
+    variants: DebugVariant[];
+  }>;
+}
+
 /** Build a versioned, JSON-serializable snapshot of the current sniffer state. */
-export function buildResourceDebugLog(options: ResourceDebugLogOptions) {
+export function buildResourceDebugLog(options: ResourceDebugLogOptions): ResourceDebugLog {
   const manifests = options.manifests || [];
   const representedIds = new Set(
     options.candidates.flatMap((candidate) => candidate.rawResourceIds),
@@ -194,19 +250,15 @@ export function buildResourceDebugLog(options: ResourceDebugLogOptions) {
     resources: options.resources.map((resource) => ({
       id: resource.id,
       url: redactUrl(resource.url),
-      canonicalUrl: canonicalUrl(resource.url),
+      canonicalUrl: canonicalOf(options.key, resource.url),
+      ruleIds: resource.ruleIds,
       finalUrl: redactUrl(resource.finalUrl),
-      canonicalFinalUrl: canonicalUrl(resource.finalUrl),
+      canonicalFinalUrl: canonicalOf(options.key, resource.finalUrl),
       filename: resource.filename,
       type: resource.type,
       size: resource.size,
       mimeType: resource.mimeType,
       quality: resource.quality,
-      qualities: resource.qualities?.map((quality) => ({
-        ...quality,
-        url: redactUrl(quality.url),
-        canonicalUrl: canonicalUrl(quality.url),
-      })),
       detectedBy: resource.detectedBy,
       detectedAt: resource.detectedAt,
       detectedAtIso: timestampIso(resource.detectedAt),
@@ -221,9 +273,9 @@ export function buildResourceDebugLog(options: ResourceDebugLogOptions) {
     })),
     manifests: manifests.map((entry) => ({
       url: redactUrl(entry.url),
-      canonicalUrl: canonicalUrl(entry.url),
-      video: entry.manifest.video.map(debugTrack),
-      audio: entry.manifest.audio.map(debugTrack),
+      canonicalUrl: canonicalOf(options.key, entry.url),
+      video: entry.manifest.video.map((track) => debugTrack(track, options.key)),
+      audio: entry.manifest.audio.map((track) => debugTrack(track, options.key)),
     })),
     candidates: options.candidates.map((candidate) => ({
       id: candidate.id,
@@ -234,11 +286,11 @@ export function buildResourceDebugLog(options: ResourceDebugLogOptions) {
       downloadable: candidate.downloadable,
       fragmentCount: candidate.fragmentCount,
       rawResourceIds: candidate.rawResourceIds,
-      variants: candidate.variants.map(debugVariant),
+      variants: candidate.variants.map((variant) => debugVariant(variant, options.key)),
     })),
   };
 }
 
-export function stringifyResourceDebugLog(log: ReturnType<typeof buildResourceDebugLog>): string {
+export function stringifyResourceDebugLog(log: ResourceDebugLog): string {
   return `${JSON.stringify(log, null, 2)}\n`;
 }
