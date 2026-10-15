@@ -1,7 +1,6 @@
 //! 引擎源端活动：同步事件只入有界队列；持久化成功后才发布活动通知。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -88,7 +87,6 @@ pub struct JournalSink {
     downstream: Arc<dyn EventSink>,
     tx: mpsc::Sender<JournalCommand>,
     last_state: Mutex<HashMap<String, (i32, String)>>,
-    total_overflows: AtomicU64,
     overflows: Arc<Mutex<HashMap<String, ActivityLoss>>>,
 }
 
@@ -102,7 +100,6 @@ impl JournalSink {
             tx,
             last_state: Mutex::new(HashMap::new()),
             overflows: overflows.clone(),
-            total_overflows: AtomicU64::new(0),
         });
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -182,10 +179,6 @@ impl JournalSink {
         })
         .await
         .map_err(|_| "activity journal flush timed out".to_owned())?
-    }
-
-    pub fn overflow_count(&self) -> u64 {
-        self.total_overflows.load(Ordering::Relaxed)
     }
 }
 
@@ -344,7 +337,6 @@ impl EventSink for JournalSink {
                 status,
             };
             if let Err(error) = self.tx.try_send(JournalCommand::Add(entry)) {
-                self.total_overflows.fetch_add(1, Ordering::Relaxed);
                 let mut pending = self.overflows.lock().unwrap_or_else(|e| e.into_inner());
                 pending.entry(task_id.clone()).or_default().overflow += 1;
                 tracing::error!(%task_id, %error, "task activity journal overflow (reported in persistent history)");
