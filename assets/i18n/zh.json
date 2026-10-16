@@ -1335,6 +1335,7 @@
   "updateManualSynology": "通过群晖套件中心安装：请在套件中心更新，或手动安装新的 .spk 套件。",
   "updateManualQnap": "通过威联通 App Center 安装：请在 App Center 更新，或手动安装新的 .qpkg 套件。",
   "updateManualOpenwrt": "通过 opkg 安装：请安装新的 .ipk 软件包完成更新。",
+  "updateManualSystemPackage": "通过系统包管理器安装（如 AUR 或发行版软件源）：请用包管理器更新，AUR 可使用 yay -Syu 或 paru -Syu。",
   "updateManualNotWritable": "FluxDown 所在目录不可写，无法自行更新。请移动到可写目录，或手动下载更新。",
   "updateManualNoAsset": "暂未发布适用于本系统的更新包，请手动下载更新。",
   "updateManualElevation": "安装此软件包需要管理员权限，但当前没有可用的图形授权对话框。请用包管理器安装更新。",

@@ -575,7 +575,6 @@ pub(crate) struct NewDownloadStrings {
     dispatched_offline: SharedString,
     dispatch_partial: SharedString,
     pub(crate) dispatch_failed: SharedString,
-    pub(crate) created: SharedString,
     import_cancelled: SharedString,
     import_partial: SharedString,
 }
@@ -676,7 +675,6 @@ impl NewDownloadStrings {
             dispatched_offline: shared(translator.text("downloadToDispatchedOffline")),
             dispatch_partial: shared(translator.text("downloadToPartial")),
             dispatch_failed: shared(translator.text("dispatchFailed")),
-            created: shared(translator.text("taskCreatedToast")),
             import_cancelled: shared(translator.text("importCancelled")),
             import_partial: shared(translator.text("importPartial")),
         }

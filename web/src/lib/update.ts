@@ -36,6 +36,10 @@ export function manualReasonKey(reason: UpdateManualReason, kind: UpdateInstallK
           return 'updateManualQnap'
         case 'openwrt':
           return 'updateManualOpenwrt'
+        // 归 AUR / 发行版仓库等非官方系统包所有：官方 deb / Arch 包永远可应用内更新。
+        case 'linuxDeb':
+        case 'linuxArch':
+          return 'updateManualSystemPackage'
         default:
           return 'updateManualUnsupported'
       }

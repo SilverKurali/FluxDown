@@ -1153,7 +1153,8 @@ pub enum UpdateInstallKind {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum UpdateManualReason {
-    /// 由包管理器 / 容器镜像管理（Docker、群晖、威联通、OpenWrt），具体见 `installKind`。
+    /// 由包管理器 / 容器镜像管理（Docker、群晖、威联通、OpenWrt，或归 AUR / 发行版仓库等
+    /// 非官方系统包所有的 `linuxDeb` / `linuxArch`），具体见 `installKind`。
     ManagedPackage,
     /// 程序所在目录对当前用户不可写（如放在受保护目录、只读卷）。
     NotWritable,

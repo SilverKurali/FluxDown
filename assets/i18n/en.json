@@ -1335,6 +1335,7 @@
   "updateManualSynology": "Installed from Synology Package Center: update FluxDown there or install the new .spk package manually.",
   "updateManualQnap": "Installed from QNAP App Center: update FluxDown there or install the new .qpkg package manually.",
   "updateManualOpenwrt": "Installed with opkg: install the new .ipk package to update.",
+  "updateManualSystemPackage": "Installed by your system package manager (e.g. from the AUR or a distribution repository): update FluxDown with that package manager, e.g. yay -Syu or paru -Syu for the AUR.",
   "updateManualNotWritable": "FluxDown's folder is not writable, so it can't update itself. Move it to a writable folder or download the update manually.",
   "updateManualNoAsset": "No update package is published for this system yet. Download the update manually.",
   "updateManualElevation": "Installing this package needs administrator rights, but no graphical authorization prompt is available. Install the update with your package manager.",

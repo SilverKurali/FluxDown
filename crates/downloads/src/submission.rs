@@ -519,6 +519,7 @@ pub struct SubmissionReport {
 pub struct SubmitNotice {
     /// `false` = 至少一条失败（用错误样式展示）。
     pub ok: bool,
+    /// 空串 = 无需提示（全部新建成功：任务已出现在列表中，不再弹 toast 遮挡列表）。
     pub message: String,
 }
 
@@ -598,7 +599,7 @@ impl SubmissionReport {
             },
             (false, None) => SubmitNotice {
                 ok: true,
-                message: strings.created.to_string(),
+                message: String::new(),
             },
             (false, Some(reason)) if added == 0 => SubmitNotice {
                 ok: false,
