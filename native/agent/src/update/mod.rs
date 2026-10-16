@@ -1330,6 +1330,17 @@ mod tests {
         panic!("phase {phase:?} not reached: {:?}", service.status());
     }
 
+    /// `Installing` 在校验与交接宿主之前就已提交：交接是异步的，需等到宿主真正收到安装请求。
+    async fn wait_installs(delegate: &RecordingDelegate, count: usize) {
+        for _ in 0..200 {
+            if delegate.installs.lock().unwrap().len() >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("host did not receive {count} install request(s)");
+    }
+
     #[test]
     fn android_target_prefers_first_published_abi_then_universal() {
         let abis = |list: &[&str]| list.iter().map(|abi| (*abi).to_owned()).collect::<Vec<_>>();
@@ -1363,6 +1374,7 @@ mod tests {
 
         service.install().await.unwrap();
         wait_phase(&service, UpdatePhase::Installing).await;
+        wait_installs(&delegate, 1).await;
         let installs = delegate.installs.lock().unwrap().clone();
         assert_eq!(installs.len(), 1);
         let (package, version) = &installs[0];
@@ -1388,6 +1400,7 @@ mod tests {
         assert!(package.exists());
         service.install().await.unwrap();
         wait_phase(&service, UpdatePhase::Installing).await;
+        wait_installs(&delegate, 2).await;
         assert_eq!(delegate.installs.lock().unwrap().len(), 2);
 
         // 签名 / 包名不符：丢弃该版本的包。
