@@ -2345,7 +2345,6 @@ impl Render for DownloadView {
                 style.bg(tokens.colors.accent.opacity(0.2))
             })
             .child(self.render_sidebar_layout(window, cx))
-            .child(self.render_status_bar(cx))
     }
 }
 

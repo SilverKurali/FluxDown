@@ -24,6 +24,8 @@ pub enum AccountHostEvent {
     SessionRevoked(ErrorReason),
     /// 收到连接后的全量快照（账户页据此清除旧错误）。
     SnapshotReplaced,
+    /// 用户在账户页切换了「推介有奖」入口开关：由 app 写设备本地偏好 `ui.show_settings_referral`。
+    ShowReferralRequested(bool),
 }
 
 pub struct AccountHost {
@@ -33,6 +35,8 @@ pub struct AccountHost {
     pending_revocation: Option<ErrorReason>,
     /// 已发出的验证码（跨对话框实例），重开对话框时恢复倒计时而不是重复发码。
     pub(crate) sent_codes: SentCodes,
+    /// 设置侧栏是否显示「推介有奖」页的设备本地偏好（由 app 从偏好投影，缺省 `false`）。
+    show_referral: bool,
 }
 
 impl EventEmitter<AccountHostEvent> for AccountHost {}
@@ -49,7 +53,33 @@ impl AccountHost {
             controller: AccountController::new(port),
             pending_revocation: None,
             sent_codes: SentCodes::default(),
+            show_referral: false,
         }
+    }
+
+    /// 设备本地偏好 `ui.show_settings_referral` 的当前值。
+    #[must_use]
+    pub fn show_referral(&self) -> bool {
+        self.show_referral
+    }
+
+    /// 偏好变化后的投影（app 在偏好快照 / 事件上调用）；值未变时不通知。
+    pub fn sync_show_referral(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.show_referral != value {
+            self.show_referral = value;
+            cx.notify();
+        }
+    }
+
+    /// 「推介有奖」页当前是否应出现在设置侧栏：已登录且偏好开启。
+    #[must_use]
+    pub fn referral_page_visible(&self) -> bool {
+        self.show_referral && self.controller.session().is_some()
+    }
+
+    /// 账户页开关：请求 app 写偏好；偏好回流后由 [`Self::sync_show_referral`] 更新显示。
+    pub(crate) fn request_show_referral(&self, value: bool, cx: &mut Context<Self>) {
+        cx.emit(AccountHostEvent::ShowReferralRequested(value));
     }
 
     pub fn replace_snapshot(&mut self, snapshot: &AgentSnapshot, cx: &mut Context<Self>) {
@@ -148,6 +178,14 @@ impl AccountHost {
     pub(crate) fn delete_device(&mut self, device_id: &str) -> PortFuture<serde_json::Value> {
         self.controller.port().execute(AccountCommand::Device {
             method: fluxdown_protocol::method::AGENT_DEVICE_DELETE,
+            params: serde_json::json!({ "id": device_id }),
+        })
+    }
+
+    /// 让同账号另一台在线设备下线以释放在线名额（不删除设备；不能对本机调用）。
+    pub(crate) fn disconnect_device(&mut self, device_id: &str) -> PortFuture<serde_json::Value> {
+        self.controller.port().execute(AccountCommand::Device {
+            method: fluxdown_protocol::method::AGENT_DEVICE_DISCONNECT,
             params: serde_json::json!({ "id": device_id }),
         })
     }

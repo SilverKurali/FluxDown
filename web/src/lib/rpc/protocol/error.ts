@@ -51,7 +51,7 @@ export type ErrorReason =
   | 'registrationIncomplete'
   | 'mailNotConfigured'
   | 'deviceLimit'
-  | 'syncDeviceLimit'
+  | 'onlineDeviceLimit'
   | 'deviceUntrusted'
   | 'sessionExpired'
   | 'passwordChanged'
@@ -81,6 +81,17 @@ export type ErrorReason =
   | 'notifyChannelLimit'
   | 'notifyDisabled'
   | 'notifyTargetInvalid'
+  | 'paymentDisabled'
+  | 'paymentGatewayFailed'
+  | 'planNotPurchasable'
+  | 'planAlreadyOwned'
+  | 'planNotUpgrade'
+  | 'planTierNotHigher'
+  | 'referralCodeInvalid'
+  | 'referralSelfUse'
+  | 'referralAlreadyUsed'
+  | 'referralPlanExcluded'
+  | 'referralCodeTaken'
   | 'unknown';
 
 /** `error.data`：应用错误的机器可读详情。 */

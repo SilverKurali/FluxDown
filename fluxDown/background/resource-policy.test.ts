@@ -44,9 +44,17 @@ describe("isWorthShowing", () => {
     expect(isWorthShowing(resource({ type: "magnet", url: "magnet:?xt=urn:btih:1" }))).toBe(true);
   });
 
-  test("低于阈值的视频不展示，attachment 豁免", () => {
-    expect(isWorthShowing(resource({ type: "video", size: 1024 }))).toBe(false);
-    expect(isWorthShowing(resource({ type: "video", size: 1024, isAttachment: true }))).toBe(true);
+  test("低于阈值的音视频照样入库（可信度 low，由视图决定是否展示）；其它类型按阈值过滤", () => {
+    expect(isWorthShowing(resource({ type: "video", size: 1024 }))).toBe(true);
+    expect(computeConfidence("video", 1024, "webRequest")).toBe("low");
+    expect(isWorthShowing(resource({ type: "other", size: 1024 }))).toBe(false);
+    expect(isWorthShowing(resource({ type: "other", size: 1024, isAttachment: true }))).toBe(true);
+  });
+
+  test("只在 API JSON 里出现过的地址为 low，被页面真正请求后按大小重新评估", () => {
+    expect(computeConfidence("stream", -1, "api-scan")).toBe("low");
+    expect(computeConfidence("archive", -1, "api-scan")).toBe("low");
+    expect(computeConfidence("archive", -1, "fetch-intercept")).toBe("medium");
   });
 
   test("大小未知放行；文档无阈值", () => {

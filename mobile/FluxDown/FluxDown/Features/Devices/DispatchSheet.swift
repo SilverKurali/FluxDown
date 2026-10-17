@@ -277,7 +277,7 @@ private struct DispatchForm: View {
                 .frame(minHeight: 110)
                 .overlay(alignment: .topLeading) {
                     if text.isEmpty {
-                        Text(L("batchUrlPlaceholder"))
+                        Text(L(BuildFlavor.key(full: "batchUrlPlaceholder", store: "batchUrlPlaceholderGeneric")))
                             .font(.callout.monospaced())
                             .foregroundStyle(.tertiary)
                             .padding(.top, 8)
@@ -288,9 +288,12 @@ private struct DispatchForm: View {
                 }
                 .accessibilityLabel(L("downloadUrl"))
             if noValid {
-                Label(L("newDownloadNoValidUrl"), systemImage: FluxSymbol.failure)
-                    .font(.footnote)
-                    .foregroundStyle(Color.fdStatusFailedText)
+                Label(
+                    L(BuildFlavor.key(full: "newDownloadNoValidUrl", store: "newDownloadNoValidUrlGeneric")),
+                    systemImage: FluxSymbol.failure
+                )
+                .font(.footnote)
+                .foregroundStyle(Color.fdStatusFailedText)
             }
         } header: {
             HStack {

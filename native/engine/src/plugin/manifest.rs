@@ -9,6 +9,10 @@
 //! `RegExp.test(value)` 匹配，见 [`super::manager`]）——对写 JS 的插件作者更自然。
 //! 本文件（纯模块）只做结构校验：`pattern` 仅 string 有效、非空即存储；实际编译/
 //! 匹配在持有 runtime 的 manager 侧完成。
+//!
+//! 官方插件索引（`zerx-lab/fluxdown-plugin-index`）的 `scripts/package-lib.mjs` 镜像本文件
+//! 与 `install.rs` 的准入规则，市场收录的包必须能在客户端安装：改字段、权限、事件、
+//! 设置矩阵或安装限制时同步该脚本。
 
 use std::collections::HashSet;
 

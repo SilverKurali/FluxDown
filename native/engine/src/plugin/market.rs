@@ -12,6 +12,9 @@
 //!   字段，晚加不破坏兼容（JSON）。当前信任模型 = 内容寻址 + 传输层 TLS + Git 历史。
 //! - `.fxplug` = 插件目录（manifest.json + *.js）的 zip；安装复用
 //!   [`super::install::install_from_zip`]（zip-slip / 压缩炸弹防护 + manifest 校验）。
+//! - 包内 manifest 是**不可信声明**：授权界面展示的是索引条目的 `permissions`，故
+//!   安装前（替换旧版本之前）强制核对 manifest 的 identity / version 与条目完全相等、
+//!   permissions 为条目声明的子集，否则拒绝（第三方 fork 索引不可信）。
 
 use std::collections::HashMap;
 
@@ -23,6 +26,7 @@ use crate::logger::{log_warn, sanitize_log_str};
 use crate::proxy_config::ProxyConfig;
 
 use super::manager::PluginManager;
+use super::manifest::PluginManifest;
 use super::runtime::PluginError;
 
 /// 内置官方索引候选源（不同法域/托管，共享同一 index_id；任一存活即可用）。
@@ -293,7 +297,10 @@ impl MarketClient {
             return Err(MarketError::Yanked(entry.yanked.clone()));
         }
         let bytes = self.download_verified(entry).await?;
-        let identity = self.manager.install_from_zip(bytes).await?;
+        let identity = self
+            .manager
+            .install_from_zip_checked(bytes, |manifest| verify_package_claim(entry, manifest))
+            .await?;
         Ok(identity)
     }
 
@@ -467,6 +474,34 @@ fn client_build_error(error: crate::downloader::DownloadError) -> MarketError {
     ))
 }
 
+/// 核对已解析校验的包内 manifest 与索引条目：identity、version 必须完全相等，
+/// permissions 必须是条目 permissions 的子集（防止越权声明绕过授权界面）。
+fn verify_package_claim(entry: &MarketEntry, manifest: &PluginManifest) -> Result<(), PluginError> {
+    if manifest.identity != entry.plugin_id {
+        return Err(PluginError::ManifestInvalid(format!(
+            "插件包 manifest 的 identity '{}' 与索引条目 '{}' 不一致",
+            manifest.identity, entry.plugin_id
+        )));
+    }
+    if manifest.version != entry.version {
+        return Err(PluginError::ManifestInvalid(format!(
+            "插件包 manifest 的 version '{}' 与索引条目 '{}' 不一致",
+            manifest.version, entry.version
+        )));
+    }
+    if let Some(extra) = manifest
+        .permissions
+        .iter()
+        .find(|p| !entry.permissions.contains(p))
+    {
+        return Err(PluginError::ManifestInvalid(format!(
+            "插件包 manifest 声明了索引条目未授权的权限 '{extra}'（manifest permissions: {:?}，索引 permissions: {:?}）",
+            manifest.permissions, entry.permissions
+        )));
+    }
+    Ok(())
+}
+
 /// 调用方确认过的版本必须与当前最新可装版本一致；未指定（旧客户端）不校验。
 fn check_expected_version(expected: Option<&str>, actual: &str) -> Result<(), MarketError> {
     match expected {
@@ -625,5 +660,112 @@ mod tests {
         assert_eq!(idx.entries.len(), 1);
         assert_eq!(idx.entries[0].plugin_id, "a@b");
         assert_eq!(idx.entries[0].sig_scheme, "none"); // 默认值
+    }
+
+    fn claim_entry(permissions: &[&str]) -> super::MarketEntry {
+        let json = serde_json::json!({
+            "pluginId": "zerx@demo",
+            "version": "1.0.0",
+            "sequence": 1,
+            "contentHash": "sha256:00",
+            "permissions": permissions,
+        });
+        serde_json::from_value(json).expect("entry")
+    }
+
+    fn fxplug(identity: &str, version: &str, permissions: &[&str]) -> Vec<u8> {
+        use std::io::Write;
+        let manifest = serde_json::json!({
+            "identity": identity,
+            "name": "Demo",
+            "version": version,
+            "permissions": permissions,
+        });
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("manifest.json", options).expect("start");
+        writer
+            .write_all(manifest.to_string().as_bytes())
+            .expect("write");
+        writer.finish().expect("finish").into_inner()
+    }
+
+    struct TempRoot(std::path::PathBuf);
+    impl TempRoot {
+        fn new() -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("fx_market_claim_{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            Self(dir)
+        }
+    }
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).expect("cleanup temp root");
+        }
+    }
+
+    fn install_claimed(
+        root: &std::path::Path,
+        entry: &super::MarketEntry,
+        bytes: &[u8],
+    ) -> Result<(), super::PluginError> {
+        let outcome = crate::plugin::install::install_from_zip_with_backup(root, bytes, |m| {
+            super::verify_package_claim(entry, m)
+        })?;
+        crate::plugin::install::commit_install(&outcome)
+    }
+
+    fn dir_names(root: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root)
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn package_claim_accepts_equal_and_subset_permissions() {
+        let root = TempRoot::new();
+        let entry = claim_entry(&["ffmpeg", "auth"]);
+        install_claimed(
+            &root.0,
+            &entry,
+            &fxplug("zerx@demo", "1.0.0", &["ffmpeg", "auth"]),
+        )
+        .expect("equal");
+        install_claimed(&root.0, &entry, &fxplug("zerx@demo", "1.0.0", &["ffmpeg"]))
+            .expect("subset");
+        install_claimed(&root.0, &entry, &fxplug("zerx@demo", "1.0.0", &[])).expect("empty");
+        assert_eq!(dir_names(&root.0), vec!["zerx@demo".to_string()]);
+    }
+
+    #[test]
+    fn package_claim_rejects_mismatch_and_keeps_installed_plugin() {
+        let root = TempRoot::new();
+        let entry = claim_entry(&["ffmpeg"]);
+        install_claimed(&root.0, &entry, &fxplug("zerx@demo", "1.0.0", &["ffmpeg"])).expect("seed");
+        let manifest_path = root.0.join("zerx@demo").join("manifest.json");
+        let before = std::fs::read(&manifest_path).expect("read manifest");
+
+        let cases = [
+            (fxplug("zerx@other", "1.0.0", &["ffmpeg"]), "identity"),
+            (fxplug("zerx@demo", "1.0.1", &["ffmpeg"]), "version"),
+            (fxplug("zerx@demo", "1.0.0", &["ffmpeg", "auth"]), "auth"),
+        ];
+        for (bytes, needle) in cases {
+            let err = install_claimed(&root.0, &entry, &bytes).expect_err("must reject");
+            let super::PluginError::ManifestInvalid(msg) = err else {
+                panic!("unexpected error variant: {err:?}");
+            };
+            assert!(msg.contains(needle), "{msg}");
+            assert_eq!(
+                std::fs::read(&manifest_path).expect("read manifest"),
+                before
+            );
+            assert_eq!(dir_names(&root.0), vec!["zerx@demo".to_string()]);
+        }
     }
 }

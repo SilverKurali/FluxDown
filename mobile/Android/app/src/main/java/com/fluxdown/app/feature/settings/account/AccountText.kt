@@ -33,7 +33,7 @@ internal object AccountText {
         "accountErrorRegistrationIncomplete" to R.string.accountErrorRegistrationIncomplete,
         "errReasonMailNotConfigured" to R.string.errReasonMailNotConfigured,
         "accountErrorDeviceLimit" to R.string.accountErrorDeviceLimit,
-        "cloudSyncErrorDeviceLimit" to R.string.cloudSyncErrorDeviceLimit,
+        "cloudSyncErrorOnlineLimit" to R.string.cloudSyncErrorOnlineLimit,
         "cloudSyncErrorDeviceUntrusted" to R.string.cloudSyncErrorDeviceUntrusted,
         "accountErrorDeviceUntrusted" to R.string.accountErrorDeviceUntrusted,
         "errReasonSessionExpired" to R.string.errReasonSessionExpired,

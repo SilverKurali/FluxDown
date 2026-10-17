@@ -6,7 +6,15 @@ import { getCapabilities } from "./host";
 import type { TabView } from "./protocol";
 import { getEngine } from "./rules-store";
 import { getCachedProfiles, getCachedSettings } from "./settings-cache";
-import { getElements, getManifests, getResources, getTabPageUrl, getTabVersion } from "./tab-state";
+import {
+  getElements,
+  getHlsPlaylists,
+  getManifests,
+  getResources,
+  getTabPageUrl,
+  getTabVersion,
+  whenRestored,
+} from "./tab-state";
 import { composeTabView, handoffFor } from "./view-model";
 
 function hostOf(url: string): string {
@@ -35,6 +43,8 @@ export async function buildTabView(tabId: number, opts: { withHandoff?: boolean 
     withHandoff ? getCapabilities() : Promise.resolve(null),
     withHandoff ? effectiveRemoteMode() : Promise.resolve("off" as const),
     tabTitle(tabId),
+    // SW 被本次请求唤醒时，会话快照恢复尚未完成；先等它，否则返回空视图（浮钮随之消失）。
+    whenRestored(),
   ]);
   const engine = getEngine();
   const resources = getResources(tabId);
@@ -53,6 +63,8 @@ export async function buildTabView(tabId: number, opts: { withHandoff?: boolean 
     version: getTabVersion(tabId),
     resources,
     manifests: getManifests(tabId),
+    hlsPlaylists: getHlsPlaylists(tabId),
+    mirrorGroups: engine.mirrorGroups(),
     elements: getElements(tabId),
     engine,
     showLowConfidence: settings.showLowConfidence,

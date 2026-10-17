@@ -633,6 +633,15 @@
     "expect": "audio"
   },
   {
+    "name": "[classify] audio/mpegurl 是 HLS 播放列表，不是音频文件",
+    "call": "classify",
+    "args": [
+      "https://x/live/playlist",
+      "audio/mpegurl"
+    ],
+    "expect": "stream"
+  },
+  {
     "name": "[classify] octet-stream 回落到扩展名",
     "call": "classify",
     "args": [

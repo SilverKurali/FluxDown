@@ -12,7 +12,8 @@ import type { ContentScriptContext } from "wxt/utils/content-script-context";
 import { createShadowRootUi, type ShadowRootContentScriptUi } from "wxt/utils/content-script-ui/shadow-root";
 import type { CandidateRow } from "@/background/protocol";
 import type { PageConfig } from "@/page/bridge";
-import { MIN_TARGET_H, MIN_TARGET_W, isMediaTag, type MediaTracker, type TrackedMedia } from "@/page/media-tracker";
+import { isMediaTag, minTargetSize, type MediaTracker, type TrackedMedia } from "@/page/media-tracker";
+import { loadSiteProfiles, profileFor, saveSiteProfile } from "@/utils/site-profiles";
 import { Icon } from "@/ui/components/Icon";
 import { ToastHost, showToast } from "@/ui/components/Toast";
 import { useT } from "@/ui/i18n";
@@ -75,6 +76,8 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
   const [flip, setFlip] = useState(false);
   const [state, setState] = useState<"idle" | "busy" | "done" | "error">("idle");
   const [, setTick] = useState(0);
+  /** 用户在菜单里选了「本页隐藏」/「本站不再显示」。 */
+  const [hidden, setHidden] = useState(false);
 
   const menuOpenRef = useRef(false);
   menuOpenRef.current = menuOpen;
@@ -108,10 +111,14 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
       if (trigger === "always") {
         const active = tracker.activePlaying();
         const r = active?.el.getBoundingClientRect();
-        choose(active && r && r.width >= MIN_TARGET_W && r.height >= MIN_TARGET_H ? active : null);
+        const min = active ? minTargetSize(active.tag) : null;
+        const ok = active && r && min && r.width >= min.w && r.height >= min.h && !tracker.isFloatExcluded(active.el);
+        choose(ok ? active : null);
         return;
       }
-      const hit = tracker.elementAtPoint(x, y);
+      const raw = tracker.elementAtPoint(x, y);
+      // page 规则排除的背景 / 广告视频视为未命中
+      const hit = raw && !tracker.isFloatExcluded(raw.el) ? raw : null;
       if (hit) {
         window.clearTimeout(hideTimer);
         hideTimer = undefined;
@@ -164,21 +171,26 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
   }, [tracker, trigger]);
 
   // ===== 候选（只取绑定到目标元素的行） =====
+  // 按元素缓存上次结果：指针移出再移入同一播放器时立即显示，不必等一次后台往返（MV3
+  // service worker 休眠后唤醒可能要数百毫秒）；随后照常刷新。
+  const rowsCacheRef = useRef(new Map<string, CandidateRow[]>());
   const targetKey = target?.key ?? null;
   useEffect(() => {
-    setRows([]);
+    setRows(targetKey ? rowsCacheRef.current.get(targetKey) ?? [] : []);
     if (!targetKey) return;
     let alive = true;
     let debounce: number | undefined;
     const load = async (): Promise<void> => {
       try {
         const res = await sendAction({ action: "getElementCandidates", elementKey: targetKey });
-        if (alive) setRows(res?.rows ?? []);
+        if (!alive) return;
+        const next = res?.rows ?? [];
+        rowsCacheRef.current.set(targetKey, next);
+        setRows(next);
       } catch {
         /* 扩展失效 / 后台唤醒中：下一轮重试 */
       }
     };
-    void load();
     // 绑定晚于播放到达：元素状态变化后重取；无行时周期轮询
     const unsubscribe = tracker.subscribe(() => {
       setTick((n) => n + 1);
@@ -200,7 +212,8 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
   const el = target?.el ?? null;
   const directSrc = rows.length === 0 && el ? httpSrcOf(el) : "";
   const videoFullscreen = !!el && fullscreenElementOf() === el;
-  const showBtn = !!target && (rows.length > 0 || directSrc !== "") && !videoFullscreen;
+  const showBtn = !!target && !hidden && (rows.length > 0 || directSrc !== "") && !videoFullscreen;
+  const position = config.floatPosition;
 
   // ===== 位置跟随：每帧读取元素矩形 =====
   useEffect(() => {
@@ -219,8 +232,15 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
         } else {
           const bw = wrap.offsetWidth || 80;
           const bh = wrap.offsetHeight || 28;
-          const left = clamp(r.right - bw - BTN_MARGIN, 4, vw - bw - 4);
-          const top = clamp(r.top + BTN_MARGIN, 4, vh - bh - 4);
+          const atRight = position === "top-right" || position === "bottom-right";
+          const atTop = position === "top-right" || position === "top-left";
+          const x0 = atRight ? r.right - bw - BTN_MARGIN : r.left + BTN_MARGIN;
+          // 音频控件条很矮：按钮放到控件条上方，不遮挡播放控件
+          const y0 = target?.tag === "audio"
+            ? r.top - bh - 4
+            : atTop ? r.top + BTN_MARGIN : r.bottom - bh - BTN_MARGIN;
+          const left = clamp(x0, 4, vw - bw - 4);
+          const top = clamp(y0, 4, vh - bh - 4);
           wrap.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
           wrap.style.visibility = "visible";
         }
@@ -230,7 +250,7 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [el, showBtn]);
+  }, [el, showBtn, position]);
 
   // ===== 弹层：点击外部 / Esc 关闭 =====
   useEffect(() => {
@@ -252,16 +272,30 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
 
   if (!showBtn || !target) return <ToastHost />;
 
-  // ===== 标签：播放档 > videoHeight > 默认文案 =====
+  // 受保护（DRM 加密）内容：下载得到的是密文，按钮只说明原因，不提供下载。
+  const protectedOnly = rows.length > 0 && rows.every((r) => r.candidate.protected === true);
+
+  // ===== 标签：有分辨率的播放档 > 元素实际高度 > 播放档（自动 / 原始）> 默认文案 =====
   const playingRow = rows.find((r) => r.playingVariantId);
   const playingVariant = playingRow?.candidate.variants.find((v) => v.id === playingRow.playingVariantId);
   const height = target.tag === "video" ? (target.el as HTMLVideoElement).videoHeight : 0;
+  // 「自动」「原始」不说明画质；此时元素正在播放的实际高度更有用。
+  const genericVariant = !playingVariant || playingVariant.label === "auto" || playingVariant.label === "original";
   // 档位标签走与清晰度菜单相同的本地化（auto / original 等内部值不直接外露）
-  const label = playingVariant
-    ? variantLabel(t, playingVariant)
-    : height > 0
-      ? `${height}p`
-      : t("float.download");
+  const label = protectedOnly
+    ? t("float.protected")
+    : !genericVariant && playingVariant
+      ? variantLabel(t, playingVariant)
+      : height > 0
+        ? `${height}P`
+        : playingVariant
+          ? variantLabel(t, playingVariant)
+          : target.tag === "audio"
+            ? t("float.downloadAudio")
+            : t("float.download");
+  const titleText = protectedOnly
+    ? t("float.protectedHint")
+    : [playingRow?.candidate.title ?? rows[0]?.candidate.title, label].filter(Boolean).join(" · ");
 
   const flash = (kind: "done" | "error", message?: string): void => {
     setState(kind);
@@ -283,7 +317,7 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
   const onClick = (): void => {
     if (state === "busy") return;
     const only = rows.length === 1 ? rows[0] : null;
-    if (only && only.candidate.variants.length === 1 && only.candidate.downloadable) {
+    if (!protectedOnly && only && only.candidate.variants.length === 1 && only.candidate.downloadable) {
       void send(() =>
         sendAction({
           action: "downloadCandidate",
@@ -300,6 +334,37 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
     const wrap = wrapRef.current;
     if (wrap) setFlip(wrap.getBoundingClientRect().bottom + 300 > window.innerHeight);
     setMenuOpen((open) => !open);
+  };
+
+  /** 当前要复制的链接：正在播放的档，否则第一个可下载档；音视频分离时两条都复制。 */
+  const copyLink = async (): Promise<void> => {
+    const row = playingRow ?? rows.find((r) => r.candidate.downloadable);
+    const variant = playingVariant ?? row?.candidate.variants[0];
+    const text = variant ? [variant.videoUrl, variant.audioUrl].filter(Boolean).join("\n") : directSrc;
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast(t("float.linkCopied"));
+    } catch {
+      showToast(t("float.copyFailed"), "error");
+    }
+  };
+
+  /** 本站不再显示浮钮：写站点配置（父域已有配置时就地更新），后台随之下发新的页面配置。 */
+  const disableForSite = async (): Promise<void> => {
+    try {
+      const profiles = await loadSiteProfiles();
+      const resolved = profileFor(profiles, location.hostname);
+      await saveSiteProfile(resolved.key ?? location.hostname, {
+        ...resolved.profile,
+        floatButton: false,
+        updatedAt: Date.now(),
+      });
+      setHidden(true);
+      showToast(t("float.disabledForSite"));
+    } catch {
+      showToast(t("site.saveFailed"), "error");
+    }
   };
 
   const stop = (e: Event): void => e.stopPropagation();
@@ -321,7 +386,7 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
           type="button"
           class="fd-float-btn"
           data-state={state}
-          title={label}
+          title={titleText}
           onClick={(e) => {
             e.stopPropagation();
             onClick();
@@ -344,10 +409,40 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
                 class="fd-qp-extra"
                 onClick={() => {
                   setMenuOpen(false);
+                  void copyLink();
+                }}
+              >
+                {t("float.copyLink")}
+              </button>
+              <button
+                type="button"
+                class="fd-qp-extra"
+                onClick={() => {
+                  setMenuOpen(false);
                   void sendAction({ action: "openPanel" }).catch(() => {});
                 }}
               >
                 {t("float.openPanel")}
+              </button>
+              <button
+                type="button"
+                class="fd-qp-extra"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setHidden(true);
+                }}
+              >
+                {t("float.hideOnPage")}
+              </button>
+              <button
+                type="button"
+                class="fd-qp-extra"
+                onClick={() => {
+                  setMenuOpen(false);
+                  void disableForSite();
+                }}
+              >
+                {t("float.disableForSite")}
               </button>
             </QualityPicker>
           </div>
@@ -369,7 +464,7 @@ export function createFloatButton(deps: FloatButtonDeps): FloatButtonController 
   let mountedHost: HTMLElement | null = null;
 
   const wanted = (): boolean => !destroyed && config !== null && config.floatButton && config.sniff;
-  const hasVideo = (): boolean => tracker.list().some((i) => i.tag === "video");
+  const hasMedia = (): boolean => tracker.list().length > 0;
 
   /** 全屏元素包含目标视频（且不是视频本身）时，挂到全屏元素里才可见。 */
   function hostAnchor(): HTMLElement {
@@ -385,7 +480,7 @@ export function createFloatButton(deps: FloatButtonDeps): FloatButtonController 
   }
 
   async function ensure(): Promise<void> {
-    if (ui || creating || !wanted() || !hasVideo()) return;
+    if (ui || creating || !wanted() || !hasMedia()) return;
     creating = true;
     try {
       await initI18n();

@@ -1,20 +1,19 @@
 use std::rc::Rc;
 
-use fluxdown_ui_components::{
-    FluxIcon, SidebarState, SlidingHighlight, activity_button as activity_bar_button,
-    color_transition, nav_icon_color, toolbar_action_button,
-};
+use fluxdown_ui_components::{FluxIcon, SidebarState, toolbar_action_button};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyElement, AnyView, App, Bounds, Context, Div, Entity, FontWeight, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, img, percentage, point, px, size,
+    AnyElement, AnyView, App, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement as _,
+    Styled, Window, div, img, percentage, px,
 };
 use gpui_component::{Icon, TitleBar, h_flex, tooltip::Tooltip, v_flex};
 
 use crate::assets::APP_LOGO_PATH;
+use crate::chrome::{ACTIVITY_BUTTON_SIZE, LayoutChangeHandler, ShellChrome, ShellWidget};
 use crate::window_controls::FixedSizeTitleBar;
+use crate::{ChromeItemSpec, ChromeLayout, ChromeZone};
 
 /// shell 路由的稳定标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,23 +24,29 @@ impl RouteId {
     pub const fn new(value: &'static str) -> Self {
         Self(value)
     }
+
+    /// 标识字符串，同时是 chrome 布局里的条目 id。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
 }
 
 /// 由应用装配并注入 shell 的路由元数据与页面内容。
 pub struct ShellRoute {
-    id: RouteId,
-    button_id: &'static str,
-    tooltip_id: &'static str,
-    label_key: &'static str,
-    icon: Icon,
+    pub(crate) id: RouteId,
+    pub(crate) button_id: &'static str,
+    pub(crate) tooltip_id: &'static str,
+    pub(crate) label_key: &'static str,
+    pub(crate) icon: Icon,
     view: AnyView,
     /// 路由活跃时渲染在统一顶栏中的插槽（靠右内容由插槽自己排布）。
     title_bar: Option<AnyView>,
     /// 页面独立侧栏状态；由 shell 统一提供顶栏收起 / 展开入口。
     sidebar: Option<Entity<SidebarState>>,
     /// 可选路由参与活动栏「是否整体渲染」的判定；固定路由（如下载）不参与。
-    optional: bool,
-    visible: bool,
+    pub(crate) optional: bool,
+    pub(crate) visible: bool,
 }
 
 impl ShellRoute {
@@ -92,10 +97,9 @@ impl ShellRoute {
 type ShellActionHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// 活动栏动作的呈现：标准图标按钮，或由 app 注入的自绘视图（如账户头像）。
-enum ShellActionContent {
+pub(crate) enum ShellActionContent {
     Button {
         tooltip_id: &'static str,
-        label_key: &'static str,
         icon: Box<Icon>,
         handler: ShellActionHandler,
     },
@@ -103,17 +107,21 @@ enum ShellActionContent {
     View(AnyView),
 }
 
-/// 由应用装配并注入 shell 的窗口级活动栏动作。
+/// 由应用装配并注入 shell 的窗口级动作（默认摆在活动栏底部，可经布局移动）。
 pub struct ShellAction {
-    button_id: &'static str,
-    content: ShellActionContent,
+    pub(crate) button_id: &'static str,
+    /// chrome 布局里的条目 id；缺省同 `button_id`。
+    pub(crate) layout_id: &'static str,
+    /// 悬浮提示 / 编辑模式拖拽预览的文案键。
+    pub(crate) label_key: &'static str,
+    pub(crate) content: ShellActionContent,
     /// 可选动作参与活动栏「是否整体渲染」的判定；固定动作（如设置）不参与。
-    optional: bool,
-    visible: bool,
+    pub(crate) optional: bool,
+    pub(crate) visible: bool,
 }
 
 impl ShellAction {
-    /// 创建不切换主内容路由的活动栏动作；默认固定显示（非可选、可见）。
+    /// 创建不切换主内容路由的动作；默认固定显示（非可选、可见）。
     pub fn new(
         button_id: &'static str,
         tooltip_id: &'static str,
@@ -123,9 +131,10 @@ impl ShellAction {
     ) -> Self {
         Self {
             button_id,
+            layout_id: button_id,
+            label_key,
             content: ShellActionContent::Button {
                 tooltip_id,
-                label_key,
                 icon: Box::new(icon),
                 handler: Rc::new(handler),
             },
@@ -134,15 +143,23 @@ impl ShellAction {
         }
     }
 
-    /// 以自绘视图占据一个活动栏按钮位（`ACTIVITY_BUTTON_SIZE` 见方，居中摆放）。
+    /// 以自绘视图占据一个按钮位（[`ShellView::ACTION_BUTTON_SIZE`] 见方，居中摆放）。
     /// 视图自行观察数据源并 notify，shell 不重建它。
-    pub fn view(button_id: &'static str, view: AnyView) -> Self {
+    pub fn view(button_id: &'static str, label_key: &'static str, view: AnyView) -> Self {
         Self {
             button_id,
+            layout_id: button_id,
+            label_key,
             content: ShellActionContent::View(view),
             optional: false,
             visible: true,
         }
+    }
+
+    /// 设置 chrome 布局里的条目 id。
+    pub fn layout_id(mut self, layout_id: &'static str) -> Self {
+        self.layout_id = layout_id;
+        self
     }
 
     /// 标记该动作是否为「可选」：活动栏在没有任何可见可选项时整体收起。
@@ -298,30 +315,31 @@ impl Render for AuxiliaryWindowView {
     }
 }
 
-/// 活动栏轨宽度：32px 按钮居中 + 左右各 8px 留白。
-const ACTIVITY_RAIL_WIDTH: gpui::Pixels = px(48.);
-/// 活动栏每个按钮位所占的行高（等于按钮自身高度，纵向间距由 `gap` 提供）。
-const ACTIVITY_TILE_HEIGHT: gpui::Pixels = px(32.);
-/// 活动栏按钮尺寸。
-const ACTIVITY_BUTTON_SIZE: gpui::Pixels = px(32.);
-/// 活动栏图标比 `extended.icon.lg` 大的余量（图标 = lg + 2，随 lg 缩放）。
-const ACTIVITY_ICON_EXTRA: gpui::Pixels = px(2.);
-/// GPUI 窗口外壳：只负责窗口 chrome、活动栏、路由与内容槽位。
+/// GPUI 窗口外壳：窗口 chrome（顶栏 / 活动栏 / 状态栏）、路由与内容槽位；
+/// chrome 条目的摆放由 [`ChromeLayout`] 决定（渲染见 `chrome.rs`）。
 pub struct ShellView {
-    translator: Entity<Translator>,
-    active_route: Option<RouteId>,
-    routes: Vec<ShellRoute>,
-    actions: Vec<ShellAction>,
+    pub(crate) translator: Entity<Translator>,
+    pub(crate) active_route: Option<RouteId>,
+    pub(crate) routes: Vec<ShellRoute>,
+    pub(crate) actions: Vec<ShellAction>,
+    pub(crate) widgets: Vec<ShellWidget>,
+    pub(crate) catalog: Vec<ChromeItemSpec>,
+    pub(crate) layout: ChromeLayout,
+    pub(crate) on_layout_change: LayoutChangeHandler,
+    /// 布局编辑模式：条目可拖放，自身交互暂停。
+    pub(crate) editing: bool,
     /// 已应用到 macOS 交通灯的纵向偏移；标题栏随文字放大撑高时重新居中。
     traffic_light_y: Pixels,
 }
 
 impl ShellView {
-    /// 创建 shell，并使用传入顺序的首条路由作为初始页面。
+    /// 创建 shell，并使用传入顺序的首条路由作为初始页面；布局先取目录默认值，
+    /// 宿主随后经 [`Self::apply_layout`] 应用偏好。
     pub fn new(
         translator: Entity<Translator>,
         routes: Vec<ShellRoute>,
         actions: Vec<ShellAction>,
+        chrome: ShellChrome,
         cx: &mut Context<Self>,
     ) -> Self {
         let active_route = routes.first().map(|route| route.id);
@@ -337,11 +355,21 @@ impl ShellView {
                 .detach();
             }
         }
+        let ShellChrome {
+            widgets,
+            catalog,
+            on_layout_change,
+        } = chrome;
         Self {
             translator,
             active_route,
             routes,
             actions,
+            widgets,
+            layout: ChromeLayout::default_for(&catalog),
+            catalog,
+            on_layout_change,
+            editing: false,
             traffic_light_y: crate::initial_traffic_light_y(),
         }
     }
@@ -379,9 +407,13 @@ impl ShellView {
         cx.notify();
     }
 
-    /// 统一顶栏：macOS 交通灯 / Windows·Linux logo + 应用菜单，其后是当前活跃路由的插槽；
-    /// Windows·Linux 的窗口按钮由 `TitleBar` 自带。
-    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 统一顶栏：macOS 交通灯 / Windows·Linux logo + 应用菜单，其后是顶栏左区、当前活跃路由的
+    /// 插槽与顶栏右区；Windows·Linux 的窗口按钮由 `TitleBar` 自带。
+    fn render_title_bar(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = active_theme(cx);
         let spacing = theme.tokens().spacing;
         let extended = theme.extended().colors;
@@ -395,6 +427,8 @@ impl ShellView {
                 .child(img(APP_LOGO_PATH).size(px(16.)))
         });
         let slot = self.active_title_bar();
+        let title_leading = self.render_title_zone(ChromeZone::TitleLeading, window, cx);
+        let title_trailing = self.render_title_zone(ChromeZone::TitleTrailing, window, cx);
         let sidebar_toggle = self
             .active_route
             .and_then(|id| self.routes.iter().find(|route| route.id == id))
@@ -420,6 +454,7 @@ impl ShellView {
                     .pr(if is_macos { spacing.md } else { spacing.sm })
                     .children(leading)
                     .children(sidebar_toggle)
+                    .children(title_leading)
                     .child(
                         h_flex()
                             .h_full()
@@ -427,7 +462,8 @@ impl ShellView {
                             .min_w_0()
                             .items_center()
                             .children(slot),
-                    ),
+                    )
+                    .children(title_trailing),
             )
     }
 
@@ -473,175 +509,8 @@ impl ShellView {
             .and_then(|route| route.title_bar.clone())
     }
 
-    fn route_button(
-        &self,
-        route: &ShellRoute,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let selected = self.active_route == Some(route.id);
-        let icon_size = active_theme(cx).extended().icon.lg + ACTIVITY_ICON_EXTRA;
-        let icon_color =
-            color_transition(route.button_id, nav_icon_color(selected, cx), window, cx);
-        let label = SharedString::from(self.translator.read(cx).text(route.label_key).to_owned());
-        let tooltip_label = label.clone();
-        let route_id = route.id;
-
-        div()
-            .id(route.tooltip_id)
-            .w(ACTIVITY_RAIL_WIDTH)
-            .h(ACTIVITY_TILE_HEIGHT)
-            .flex()
-            .items_center()
-            .justify_center()
-            .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
-            .child(
-                activity_bar_button(
-                    route.button_id,
-                    label,
-                    route.icon.clone().size(icon_size).text_color(icon_color),
-                    selected,
-                    ACTIVITY_BUTTON_SIZE,
-                    cx,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.active_route != Some(route_id) {
-                        this.active_route = Some(route_id);
-                        cx.notify();
-                    }
-                })),
-            )
-            .into_any_element()
-    }
-
-    /// 路由按钮列：选中底是一块随选中项滑动的底块（按钮自身不画选中底）。
-    fn route_buttons(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = active_theme(cx);
-        let gap = theme.tokens().spacing.xs;
-        let radius = theme.components().nav_item_radius;
-        let selected_color = theme.extended().colors.nav_selected;
-        let highlight = self
-            .routes
-            .iter()
-            .filter(|route| route.visible)
-            .position(|route| self.active_route == Some(route.id))
-            .map(|index| {
-                let inset = (ACTIVITY_RAIL_WIDTH - ACTIVITY_BUTTON_SIZE) / 2.;
-                let top = (ACTIVITY_TILE_HEIGHT + gap) * index as f32
-                    + (ACTIVITY_TILE_HEIGHT - ACTIVITY_BUTTON_SIZE) / 2.;
-                SlidingHighlight::new(
-                    "shell-activity-selection",
-                    Bounds::new(
-                        point(inset, top),
-                        size(ACTIVITY_BUTTON_SIZE, ACTIVITY_BUTTON_SIZE),
-                    ),
-                    selected_color,
-                )
-                .radius(radius)
-            });
-        let buttons: Vec<AnyElement> = self
-            .routes
-            .iter()
-            .filter(|route| route.visible)
-            .map(|route| self.route_button(route, window, cx))
-            .collect();
-        v_flex()
-            .relative()
-            .gap(gap)
-            .children(highlight)
-            .children(buttons)
-    }
-
-    fn action_button(&self, action: &ShellAction, cx: &mut Context<Self>) -> AnyElement {
-        let tile = div()
-            .w(ACTIVITY_RAIL_WIDTH)
-            .h(ACTIVITY_TILE_HEIGHT)
-            .flex()
-            .items_center()
-            .justify_center();
-        let (tooltip_id, label_key, icon, handler) = match &action.content {
-            ShellActionContent::View(view) => return tile.child(view.clone()).into_any_element(),
-            ShellActionContent::Button {
-                tooltip_id,
-                label_key,
-                icon,
-                handler,
-            } => (
-                *tooltip_id,
-                *label_key,
-                Icon::clone(icon),
-                Rc::clone(handler),
-            ),
-        };
-        let label = SharedString::from(self.translator.read(cx).text(label_key).to_owned());
-        let tooltip_label = label.clone();
-        let theme = active_theme(cx);
-        let icon_size = theme.extended().icon.lg + ACTIVITY_ICON_EXTRA;
-        let icon_color = theme.tokens().colors.muted_foreground;
-
-        tile.id(tooltip_id)
-            .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
-            .child(
-                activity_bar_button(
-                    action.button_id,
-                    label,
-                    icon.size(icon_size).text_color(icon_color),
-                    false,
-                    ACTIVITY_BUTTON_SIZE,
-                    cx,
-                )
-                .on_click(move |_, window, cx| handler(window, cx)),
-            )
-            .into_any_element()
-    }
-
     /// 自绘动作视图的按钮位尺寸（视图按此尺寸绘制以与图标按钮对齐）。
     pub const ACTION_BUTTON_SIZE: Pixels = ACTIVITY_BUTTON_SIZE;
-
-    fn action_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let gap = active_theme(cx).tokens().spacing.xs;
-        v_flex().gap(gap).children(
-            self.actions
-                .iter()
-                .filter(|action| action.visible)
-                .map(|action| self.action_button(action, cx)),
-        )
-    }
-
-    /// 是否存在至少一个可见的「可选」路由或动作；活动栏仅在此为真时渲染。
-    fn has_visible_optional_item(&self) -> bool {
-        self.routes
-            .iter()
-            .any(|route| route.optional && route.visible)
-            || self
-                .actions
-                .iter()
-                .any(|action| action.optional && action.visible)
-    }
-
-    fn render_activity_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
-        if !self.has_visible_optional_item() {
-            return None;
-        }
-        let theme = active_theme(cx);
-        let spacing = theme.tokens().spacing;
-        let extended = theme.extended();
-        // 与侧栏同为 chrome 底，靠右侧 hairline 结构线分界（与侧栏|内容的 resizable 把手同色同粗）。
-        Some(
-            v_flex()
-                .h_full()
-                .w(ACTIVITY_RAIL_WIDTH)
-                .flex_none()
-                .justify_between()
-                .bg(extended.colors.chrome)
-                .border_r(extended.stroke.thin)
-                .border_color(extended.colors.hairline)
-                .pt(spacing.sm)
-                .pb(spacing.sm)
-                .child(self.route_buttons(window, cx))
-                .child(self.action_buttons(cx)),
-        )
-    }
 
     fn active_content(&self) -> AnyElement {
         self.active_route
@@ -661,25 +530,38 @@ impl Render for ShellView {
             &mut self.traffic_light_y,
         );
         let colors = active_theme(cx).tokens().colors;
+        let title_bar = self.render_title_bar(window, cx);
+        let banner = self.render_edit_banner(cx);
+        let activity_bar = self.render_activity_bar(window, cx);
+        let status_bar = self.render_status_bar(window, cx);
         v_flex()
             .size_full()
             .relative()
             .bg(colors.background)
             .text_color(colors.foreground)
-            .child(self.render_title_bar(cx))
+            .on_key_down(cx.listener(Self::on_edit_key_down))
+            .child(title_bar)
+            .children(banner)
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
                     .items_stretch()
-                    .children(self.render_activity_bar(window, cx))
+                    .children(activity_bar)
                     .child(
-                        div()
+                        v_flex()
                             .h_full()
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
-                            .child(self.active_content()),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .child(self.active_content()),
+                            )
+                            .children(status_bar),
                     ),
             )
     }

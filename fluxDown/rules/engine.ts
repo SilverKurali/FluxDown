@@ -100,6 +100,12 @@ export interface DomRuleEntry {
   emit: EmitSpec;
 }
 
+/** page 阶段规则给内容脚本的提示。 */
+export interface PageHints {
+  titles: { selector: string; attr?: string }[];
+  players: { selector: string }[];
+}
+
 export interface CompiledRules {
   /** 受 requires / classifyOnly 约束 */
   classifyResponse(i: ResponseInput): ResponseDecision;
@@ -118,7 +124,14 @@ export interface CompiledRules {
   }): "video" | "audio" | null;
   bodyWatchers(pageUrl: string): BodyWatcher[];
   extractFromBody(url: string, pageUrl: string, json: unknown): BodyExtraction[];
+  /** body 阶段 manifest 规则命中时，按规则 path 取出的 DASH 结构子树。 */
+  manifestsFromBody(url: string, pageUrl: string, json: unknown): unknown[];
   domRules(pageUrl: string): DomRuleEntry[];
+  pageHints(pageUrl: string): PageHints;
+  /** request 阶段 headers 规则为该 URL 补充的请求头（名字小写；先命中的规则优先）。 */
+  requestHeaders(url: string, pageUrl: string): Record<string, string>;
+  /** normalize 阶段 mirror 规则声明的镜像域名组。 */
+  mirrorGroups(): string[][];
   renderDomEmit(
     rule: RuleRef,
     emit: EmitSpec,
@@ -434,8 +447,11 @@ export function compileRules(input: CompileInput): CompiledRules {
   const stripRules = byKind("strip-params");
   const filenameRules = byKind("filename");
   const trackRules = byKind("track");
-  const bodyRules = byKind("extract");
+  const bodyRules = byKind("extract", "manifest");
   const domRuleList = byKind("dom");
+  const pageRules = byKind("title", "player");
+  const headerRules = byKind("headers");
+  const mirrorRules = byKind("mirror");
 
   const known = new Set<string>();
   for (const c of responseRules) {
@@ -652,6 +668,18 @@ export function compileRules(input: CompileInput): CompiledRules {
       return out;
     },
 
+    manifestsFromBody(url, pageUrl, json) {
+      const c = makeCtx(url, pageUrl);
+      const out: unknown[] = [];
+      for (const r of bodyRules) {
+        const a = r.rule.action;
+        if (a.kind !== "manifest" || !r.matches(c)) continue;
+        const node = a.path ? getPath(json, a.path) : json;
+        if (node !== undefined && node !== null) out.push(node);
+      }
+      return out;
+    },
+
     domRules(pageUrl) {
       const c = makeCtx(pageUrl, pageUrl);
       const out: DomRuleEntry[] = [];
@@ -662,6 +690,41 @@ export function compileRules(input: CompileInput): CompiledRules {
         }
       }
       return out;
+    },
+
+    pageHints(pageUrl) {
+      const c = makeCtx(pageUrl, pageUrl);
+      const hints: PageHints = { titles: [], players: [] };
+      for (const r of pageRules) {
+        if (!r.matches(c)) continue;
+        const a = r.rule.action;
+        if (a.kind === "title") hints.titles.push(a.attr ? { selector: a.selector, attr: a.attr } : { selector: a.selector });
+        else if (a.kind === "player") hints.players.push({ selector: a.selector });
+      }
+      return hints;
+    },
+
+    requestHeaders(url, pageUrl) {
+      const c = makeCtx(url, pageUrl);
+      const out: Record<string, string> = {};
+      for (const r of headerRules) {
+        const a = r.rule.action;
+        if (a.kind !== "headers" || !r.matches(c)) continue;
+        for (const [name, value] of Object.entries(a.set)) {
+          const lower = name.toLowerCase();
+          if (!(lower in out)) out[lower] = value;
+        }
+      }
+      return out;
+    },
+
+    mirrorGroups() {
+      const groups: string[][] = [];
+      for (const r of mirrorRules) {
+        const a = r.rule.action;
+        if (a.kind === "mirror") groups.push([...a.hosts]);
+      }
+      return groups;
     },
 
     renderDomEmit(_rule, emit, fields) {

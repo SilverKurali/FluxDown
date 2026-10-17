@@ -7,6 +7,9 @@
  * 实时数据优先，空缺部分用快照补上。
  */
 import type { DashManifest } from "@/utils/dash-manifest";
+import { normalizeHlsPlaylist, type HlsPlaylistEntry, type HlsPlaylistInfo } from "@/utils/hls-playlist";
+import type { DashManifestEntry } from "@/utils/media-candidates";
+import { pageUrlKey } from "@/utils/page-nav";
 import type { DetectedResource } from "@/utils/resource-types";
 import type { ElementState } from "./protocol";
 
@@ -14,7 +17,9 @@ import type { ElementState } from "./protocol";
 export interface PersistedTab {
   pageUrl: string;
   resources: DetectedResource[];
-  manifests: { url: string; manifest: DashManifest }[];
+  manifests: DashManifestEntry[];
+  /** 旧版本快照没有此字段。 */
+  hlsPlaylists?: HlsPlaylistEntry[];
   elements: ElementState[];
 }
 
@@ -23,17 +28,9 @@ export interface RestorableState {
   pageUrl: string;
   resources: Map<string, DetectedResource>;
   manifests: Map<string, DashManifest>;
+  carriedManifests: Set<string>;
+  hlsPlaylists: Map<string, HlsPlaylistInfo>;
   elements: Map<string, ElementState>;
-}
-
-/** origin+pathname+search（忽略 hash）：fragment 导航与 replaceState 写回不算换页。 */
-export function pageUrlKey(url: string): string {
-  try {
-    const u = new URL(url);
-    return `${u.origin}${u.pathname}${u.search}`;
-  } catch {
-    return url;
-  }
 }
 
 /**
@@ -57,7 +54,14 @@ export function mergeRestoredTab(
   for (const entry of saved.manifests ?? []) {
     if (state.manifests.has(entry.url)) continue;
     const manifest = normalizeManifest(entry.manifest);
-    if (manifest) state.manifests.set(entry.url, manifest);
+    if (!manifest) continue;
+    state.manifests.set(entry.url, manifest);
+    if (entry.carried) state.carriedManifests.add(entry.url);
+  }
+  for (const entry of saved.hlsPlaylists ?? []) {
+    if (state.hlsPlaylists.has(entry.url)) continue;
+    const playlist = normalizeHlsPlaylist(entry.playlist);
+    if (playlist) state.hlsPlaylists.set(entry.url, playlist);
   }
   for (const element of saved.elements ?? []) {
     if (!state.elements.has(element.key)) state.elements.set(element.key, element);

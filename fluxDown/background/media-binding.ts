@@ -5,13 +5,17 @@
  * - exact：数据 buffer 带着来源 URL 标记（fetch / XHR 响应 → append）；
  * - temporal：没有标记时，append 前 3 s 内完成的媒体响应计数。
  */
-import type { MediaCandidate } from "@/utils/media-candidates";
+import { trackFileKey, type MediaCandidate } from "@/utils/media-candidates";
 import type { ElementState } from "./protocol";
 
 export interface CandidateBinding {
   elementKey: string;
   playingVariantId: string | null;
-  confidence: "exact" | "temporal";
+  /**
+   * exact：追加的数据带来源标记；temporal：按时间窗口归因；inferred：元素没有任何来源证据
+   * （播放器在 Worker 里取数据 / MSE in Worker），按「唯一正在播放的元素 ↔ 唯一可下载候选」推断。
+   */
+  confidence: "exact" | "temporal" | "inferred";
 }
 
 /** 元素优先级：播放且大半可见 3；播放 2；可见且尺寸够大 1；其余 0。 */
@@ -62,27 +66,46 @@ function evidenceOf(e: ElementState, key: (u: string) => string): ElementEvidenc
   return { exact, temporal };
 }
 
+/** 变体关联播放元素可用的视频轨 URL：下载用的轨 + 同档被合并掉的其它编码轨。 */
+function variantVideoUrls(v: MediaCandidate["variants"][number]): string[] {
+  return [v.videoUrl, ...(v.alternateUrls ?? [])];
+}
+
 function candidateUrlKeys(c: MediaCandidate, key: (u: string) => string): Set<string> {
   const keys = new Set<string>(c.rawResourceIds);
   for (const v of c.variants) {
-    keys.add(key(v.videoUrl));
+    for (const url of variantVideoUrls(v)) keys.add(key(url));
     if (v.audioUrl) keys.add(key(v.audioUrl));
   }
   return keys;
 }
 
+/**
+ * 元素正在播放的档位。先按完整 URL 键精确匹配；再按轨道文件身份（`trackFileKey`）匹配，
+ * 因为播放器常从与清单 BaseURL 不同的 CDN 镜像取同一文件（B 站 upos / mcdn 互换域名）；
+ * 都没有时取 temporal 计数最高的档。
+ */
 function playingVariant(
   c: MediaCandidate,
   evidence: ElementEvidence,
   key: (u: string) => string,
 ): string | null {
+  const exactFiles = new Set([...evidence.exact].map(trackFileKey));
   for (const v of c.variants) {
-    if (evidence.exact.has(key(v.videoUrl))) return v.id;
+    if (variantVideoUrls(v).some((url) => evidence.exact.has(key(url)))) return v.id;
+  }
+  for (const v of c.variants) {
+    if (variantVideoUrls(v).some((url) => exactFiles.has(trackFileKey(url)))) return v.id;
+  }
+  const temporalFiles = new Map<string, number>();
+  for (const [url, count] of evidence.temporal) {
+    const file = trackFileKey(url);
+    temporalFiles.set(file, (temporalFiles.get(file) ?? 0) + count);
   }
   let best: string | null = null;
   let bestCount = 0;
   for (const v of c.variants) {
-    const count = evidence.temporal.get(key(v.videoUrl)) ?? 0;
+    const count = variantVideoUrls(v).reduce((sum, url) => sum + (temporalFiles.get(trackFileKey(url)) ?? 0), 0);
     if (count > bestCount) {
       bestCount = count;
       best = v.id;

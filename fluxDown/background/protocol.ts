@@ -13,6 +13,7 @@ import type {
 } from "@/rules/engine";
 import type { RulePack, RevocationDoc } from "@/rules/schema";
 import type { DashManifest } from "@/utils/dash-manifest";
+import type { HlsPlaylistInfo } from "@/utils/hls-playlist";
 import type { MediaCandidate } from "@/utils/media-candidates";
 import type { ResourceDebugLog } from "@/utils/resource-debug-log";
 import type {
@@ -40,6 +41,10 @@ export interface ElementState {
   lastPlayedAt: number;
   lastInteractionAt: number;
   bindings: SourceBufferBinding[];
+  /** 元素对应内容的标题（page 规则 / Media Session / 元素属性）；空串表示未知，沿用页面标题。 */
+  title: string;
+  /** 元素当前来源受 DRM 保护（EME `encrypted` 事件或已挂 MediaKeys）。 */
+  encrypted: boolean;
   tracks: { kind: string; srclang: string; label: string; src: string }[];
 }
 
@@ -49,7 +54,7 @@ export interface CandidateRow {
   candidate: MediaCandidate;
   elementKey: string | null;
   playingVariantId: string | null;
-  binding: "exact" | "temporal" | "none";
+  binding: "exact" | "temporal" | "inferred" | "none";
   ruleIds: string[];
 }
 
@@ -169,6 +174,10 @@ export interface MessageMap {
     req: { manifest: DashManifest; manifestUrl: string; pageUrl: string };
     res: { ok: boolean };
   };
+  hlsObserved: {
+    req: { url: string; playlist: HlsPlaylistInfo; pageUrl: string };
+    res: { ok: boolean };
+  };
   bodyObserved: {
     req: { url: string; pageUrl: string; ruleIds: string[]; text: string };
     res: { emitted: number };
@@ -181,7 +190,9 @@ export interface MessageMap {
   /** 侧边栏诊断「导出资源调试日志」：按 tab 生成已脱敏的嗅探状态快照。 */
   getDebugLog: { req: { tabId: number }; res: ResourceDebugLog };
   preemptDownload: { req: { url: string }; res: { ok: boolean } };
-  pageUrlChanged: { req: { pageUrl: string }; res: { ok: boolean } };
+  /** 帧所在源注册的 Service Worker 作用域；background 校验同源后登记。 */
+  serviceWorkerScope: { req: { scope: string }; res: { ok: boolean } };
+  pageUrlChanged: { req: { pageUrl: string; kind: "push" | "replace" | "pop" }; res: { ok: boolean } };
   mediaElementState: {
     req: { elements: Omit<ElementState, "frameId">[]; removed: string[] };
     res: { ok: boolean };

@@ -8,7 +8,6 @@ import { sendBatchDownloadRequest, sendDownloadRequest, warmupNativeHost, isUnre
 import type { DownloadRequest } from "@/utils/native-messaging";
 import { extractCleanFilename } from "@/utils/filename";
 import { t } from "@/utils/i18n";
-import { loadSettings } from "@/utils/settings";
 import { allowBypass, claimAppDownNotice, markAppDown, markAppUp, probeAppReachable } from "./breaker";
 import { notify } from "./notify";
 import type { SendChannel, SendResult } from "./protocol";
@@ -17,6 +16,17 @@ import type { CapturedBody } from "./request-cache";
 import { getCachedProfiles, getCachedSettings } from "./settings-cache";
 import { incrementStat } from "./stats";
 import { maybeArmTaskPollForChannel } from "./tasks";
+import { getEngine } from "./rules-store";
+
+/**
+ * 补上 request 阶段 headers 规则为该 URL 声明的请求头，只补缺失的名字（浏览器真实请求头优先）。
+ * 单条与批量下载共用。
+ */
+export function withRuleHeaders(url: string, pageUrl: string, headers: Record<string, string>): Record<string, string> {
+  const present = new Set(Object.keys(headers).map((name) => name.toLowerCase()));
+  const missing = Object.entries(getEngine().requestHeaders(url, pageUrl)).filter(([name]) => !present.has(name));
+  return missing.length > 0 ? { ...headers, ...Object.fromEntries(missing) } : headers;
+}
 
 /** 一次发送请求（单条下载）。 */
 export interface SendInput {
@@ -190,6 +200,9 @@ export async function sendToFluxDown(input: SendInput): Promise<SendOutcome> {
     extraHeaders = storedHeaders;
   }
 
+  // 策略 4：request 阶段 headers 规则为该 CDN 声明的请求头（Referer / Origin 等）。
+  extraHeaders = withRuleHeaders(url, referrer || "", extraHeaders);
+
   // #610：所有下载路径统一兜底补上浏览器真实 UA。
   extraHeaders = withBrowserUserAgent(extraHeaders) ?? extraHeaders;
 
@@ -272,7 +285,7 @@ export function describeSendError(message?: string): string {
 export async function shouldNotifyChannel(
   channel?: "local" | "remote",
 ): Promise<boolean> {
-  const settings = await loadSettings();
+  const settings = await getCachedSettings();
   return channel === "remote"
     ? settings.notifyRemoteTask !== false
     : settings.notifyLocalTask === true;

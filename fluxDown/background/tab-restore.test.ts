@@ -16,7 +16,14 @@ function element(key: string): ElementState {
 }
 
 function emptyState(pageUrl = ""): RestorableState {
-  return { pageUrl, resources: new Map(), manifests: new Map(), elements: new Map() };
+  return {
+    pageUrl,
+    resources: new Map(),
+    manifests: new Map(),
+    carriedManifests: new Set(),
+    hlsPlaylists: new Map(),
+    elements: new Map(),
+  };
 }
 
 const saved: PersistedTab = {

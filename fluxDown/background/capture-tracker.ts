@@ -5,13 +5,13 @@
 import { browser } from "wxt/browser";
 import type { Browser } from "wxt/browser";
 import { t } from "@/utils/i18n";
-import { DEFAULT_SITE_PROFILE, loadSiteProfiles, profileFor, saveSiteProfile } from "@/utils/site-profiles";
+import { DEFAULT_SITE_PROFILE, profileFor, saveSiteProfile } from "@/utils/site-profiles";
 import { nextCaptureActions, pruneCancelStats, reconcilePending } from "./capture-logic";
 import type { CancelStats, CaptureAction, PendingCapture } from "./capture-logic";
 import { captureStatus } from "./host";
 import { notify } from "./notify";
 import { addSendObserver, fallbackToBrowserDownload } from "./sender";
-import { getCachedSettings } from "./settings-cache";
+import { getCachedProfiles, getCachedSettings } from "./settings-cache";
 
 const PENDING_KEY = "fluxdown_capture_pending";
 const CANCEL_STATS_KEY = "fluxdown_cancel_stats";
@@ -101,7 +101,7 @@ async function poll(): Promise<void> {
     const [settings, stats, profiles] = await Promise.all([
       getCachedSettings(),
       loadStats(),
-      loadSiteProfiles(),
+      getCachedProfiles(),
     ]);
     const snapshot = pending;
     const snapshotIds = new Set(snapshot.map((p) => p.id));

@@ -265,7 +265,7 @@
     },
     {
       "id": "builtin.mime.stream",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
       "stage": "response",
       "priority": 11,
@@ -275,6 +275,8 @@
           "application/x-mpegurl",
           "application/mpegurl",
           "application/octet-stream-m3u8",
+          "audio/mpegurl",
+          "audio/x-mpegurl",
           "application/dash+xml",
           "application/m4s"
         ]
@@ -771,6 +773,21 @@
           },
           "filename": "${name}"
         }
+      }
+    },
+    {
+      "id": "builtin.title.douyin",
+      "version": 1,
+      "tier": "builtin",
+      "stage": "page",
+      "match": {
+        "pageHost": [
+          "douyin.com"
+        ]
+      },
+      "action": {
+        "kind": "title",
+        "selector": "[data-e2e=\"video-desc\"]"
       }
     }
   ]

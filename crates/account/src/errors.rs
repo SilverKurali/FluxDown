@@ -79,7 +79,7 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         ErrorReason::RegistrationIncomplete => "accountErrorRegistrationIncomplete",
         ErrorReason::MailNotConfigured => "errReasonMailNotConfigured",
         ErrorReason::DeviceLimit => "accountErrorDeviceLimit",
-        ErrorReason::SyncDeviceLimit => "cloudSyncErrorDeviceLimit",
+        ErrorReason::OnlineDeviceLimit => "cloudSyncErrorOnlineLimit",
         ErrorReason::DeviceUntrusted => {
             if context == ErrorContext::Sync {
                 "cloudSyncErrorDeviceUntrusted"
@@ -110,6 +110,17 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         ErrorReason::TaskStateConflict => "errReasonTaskStateConflict",
         ErrorReason::TaskDeviceMismatch => "errReasonTaskDeviceMismatch",
         ErrorReason::SaveDirUnavailable => "errReasonSaveDirUnavailable",
+        ErrorReason::PaymentDisabled
+        | ErrorReason::PaymentGatewayFailed
+        | ErrorReason::PlanNotPurchasable
+        | ErrorReason::PlanAlreadyOwned
+        | ErrorReason::PlanNotUpgrade
+        | ErrorReason::PlanTierNotHigher
+        | ErrorReason::ReferralCodeInvalid
+        | ErrorReason::ReferralSelfUse
+        | ErrorReason::ReferralAlreadyUsed
+        | ErrorReason::ReferralPlanExcluded
+        | ErrorReason::ReferralCodeTaken => return crate::billing::billing_reason_key(reason),
         // 插件市场、Doctor、API 服务切换与云端推送由各自页面展示；这里退回按 code 的通用文案。
         ErrorReason::MarketUnreachable
         | ErrorReason::MarketIndexInvalid
@@ -253,6 +264,22 @@ mod tests {
     }
 
     #[test]
+    fn billing_reasons_use_plan_and_referral_keys() {
+        let taken =
+            error(ApplicationErrorCode::Conflict).with_reason(ErrorReason::ReferralCodeTaken);
+        assert_eq!(
+            error_key(&taken, ErrorContext::General),
+            "accountReferralCodeTaken"
+        );
+        let gateway =
+            error(ApplicationErrorCode::Unavailable).with_reason(ErrorReason::PaymentGatewayFailed);
+        assert_eq!(
+            error_key(&gateway, ErrorContext::General),
+            "accountPlanErrorGateway"
+        );
+    }
+
+    #[test]
     fn retryable_unavailable_is_network_in_auth_contexts() {
         let offline = RpcErrorData::new(ApplicationErrorCode::Unavailable, true);
         assert_eq!(
@@ -302,8 +329,8 @@ mod tests {
     fn sync_reason_without_mapping_uses_generic_sync_failure() {
         assert_eq!(sync_reason_key(None), "cloudSyncErrorGeneric");
         assert_eq!(
-            sync_reason_key(Some(ErrorReason::SyncDeviceLimit)),
-            "cloudSyncErrorDeviceLimit"
+            sync_reason_key(Some(ErrorReason::OnlineDeviceLimit)),
+            "cloudSyncErrorOnlineLimit"
         );
         assert_eq!(
             sync_reason_key(Some(ErrorReason::Unknown)),
@@ -352,7 +379,7 @@ mod tests {
             ErrorReason::RegistrationIncomplete,
             ErrorReason::MailNotConfigured,
             ErrorReason::DeviceLimit,
-            ErrorReason::SyncDeviceLimit,
+            ErrorReason::OnlineDeviceLimit,
             ErrorReason::DeviceUntrusted,
             ErrorReason::SessionExpired,
             ErrorReason::CloudUnreachable,

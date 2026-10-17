@@ -144,6 +144,7 @@ export const METHOD = {
   AGENT_REMOTE_RECONNECT: 'agent.remote.reconnect',
   AGENT_DEVICE_RENAME: 'agent.device.rename',
   AGENT_DEVICE_DELETE: 'agent.device.delete',
+  AGENT_DEVICE_DISCONNECT: 'agent.device.disconnect',
   AGENT_PREFERENCES_PATCH: 'agent.preferences.patch',
   AGENT_SYNC_GET: 'agent.sync.get',
   AGENT_SYNC_ENABLE: 'agent.sync.enable',

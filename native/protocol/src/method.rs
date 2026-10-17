@@ -153,6 +153,9 @@ pub const AGENT_DEVICE_LIST: &str = "agent.device.list";
 pub const AGENT_REMOTE_RECONNECT: &str = "agent.remote.reconnect";
 pub const AGENT_DEVICE_RENAME: &str = "agent.device.rename";
 pub const AGENT_DEVICE_DELETE: &str = "agent.device.delete";
+/// `{ "id": "<设备 id>" }`：让同账号的另一台在线设备下线释放在线名额（不删除设备）；
+/// 不能对本机调用。成功响应 `{ "ok": true }`。
+pub const AGENT_DEVICE_DISCONNECT: &str = "agent.device.disconnect";
 pub const AGENT_PREFERENCES_PATCH: &str = "agent.preferences.patch";
 pub const AGENT_SYNC_GET: &str = "agent.sync.get";
 pub const AGENT_SYNC_ENABLE: &str = "agent.sync.enable";
@@ -413,6 +416,7 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_REMOTE_RECONNECT,
     AGENT_DEVICE_RENAME,
     AGENT_DEVICE_DELETE,
+    AGENT_DEVICE_DISCONNECT,
     AGENT_PREFERENCES_PATCH,
     AGENT_SYNC_GET,
     AGENT_SYNC_ENABLE,

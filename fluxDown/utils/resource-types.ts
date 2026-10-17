@@ -27,7 +27,9 @@ export type DetectionMethod =
   | "dom-scan"
   | "mutation-observer"
   | "fetch-intercept"
-  | "xhr-intercept";
+  | "xhr-intercept"
+  /** URL 只出现在页面 API 的 JSON 响应里，页面未必真的请求过（列表页 / 推荐流常见）。 */
+  | "api-scan";
 
 /**
  * 资源可信度等级
@@ -70,6 +72,8 @@ export interface DetectedResource {
   lang?: string;
   /** 字幕标签（<track label>）。 */
   label?: string;
+  /** 换页前请求的播放清单（自动连播预取的下一个视频）：只在关联到播放元素后展示。 */
+  carried?: boolean;
 }
 
 /** sensor → background（sensorReport）的资源上报格式 */

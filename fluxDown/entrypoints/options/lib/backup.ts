@@ -66,6 +66,7 @@ export type BackupParseError = "json" | "format" | "version";
 const ENUM_FIELDS: Record<string, readonly string[]> = {
   interceptMode: ["smart", "all", "extension"],
   floatButtonTrigger: ["hover", "always"],
+  floatButtonPosition: ["top-right", "top-left", "bottom-right", "bottom-left"],
   remoteMode: ["off", "fallback", "always"],
 };
 

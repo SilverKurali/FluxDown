@@ -145,6 +145,7 @@ object HostMethod {
     const val agentRemoteReconnect = "agent.remote.reconnect"
     const val agentDeviceRename = "agent.device.rename"
     const val agentDeviceDelete = "agent.device.delete"
+    const val agentDeviceDisconnect = "agent.device.disconnect"
     const val agentPreferencesPatch = "agent.preferences.patch"
     const val agentSyncGet = "agent.sync.get"
     const val agentSyncEnable = "agent.sync.enable"

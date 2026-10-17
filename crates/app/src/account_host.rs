@@ -7,6 +7,7 @@ use std::{collections::HashSet, sync::Arc};
 use fluxdown_protocol::ErrorReason;
 use fluxdown_ui_account::{AccountHost, AccountHostEvent, open_add_device, open_pairing_prompt};
 use fluxdown_ui_i18n::Translator;
+use fluxdown_ui_settings::SettingsStore;
 use gpui::{App, AppContext as _, Entity, Global, Window};
 use gpui_component::{WindowExt as _, notification::Notification};
 
@@ -38,10 +39,53 @@ pub(crate) fn install(
         AccountHostEvent::PairingRequested(id) => show_pairing_prompt(&host, id, cx),
         AccountHostEvent::SessionRevoked(reason) => notify_session_revoked(&host, *reason, cx),
         AccountHostEvent::SnapshotReplaced => {}
+        AccountHostEvent::ShowReferralRequested(value) => {
+            Desktop::set_pref(cx, SHOW_REFERRAL_PREF, serde_json::Value::Bool(*value));
+        }
     })
     .detach();
     attach(session, &host, cx);
     host
+}
+
+/// 设备本地偏好：设置侧栏是否显示「推介有奖」页（缺省 false）。不在云同步目录内，
+/// `SettingsStore::set_pref` 对目录外的键走 `sync:false` 路径，因此永不上云。
+pub(crate) const SHOW_REFERRAL_PREF: &str = "ui.show_settings_referral";
+
+/// 偏好 → 账户宿主 → 设置页可见性：偏好变化投影到宿主（账户页开关的显示值），宿主（登录态）
+/// 或偏好任一变化都重算「已登录 && 偏好开启」并推给 [`Desktop::referral_visibility`]。
+/// 要求 `Desktop` 全局已就绪。
+pub(crate) fn bind_referral_visibility(cx: &mut App) {
+    let desktop = Desktop::global(cx);
+    let store = desktop.settings_store.clone();
+    let host = desktop.account_host.clone();
+    let visibility = desktop.referral_visibility.clone();
+
+    let project_pref = {
+        let host = host.clone();
+        move |store: &Entity<SettingsStore>, cx: &mut App| {
+            let value = store
+                .read(cx)
+                .pref(SHOW_REFERRAL_PREF)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            host.update(cx, |host, cx| host.sync_show_referral(value, cx));
+        }
+    };
+    let project_visibility = {
+        let visibility = visibility.clone();
+        move |host: &Entity<AccountHost>, cx: &mut App| {
+            let visible = host.read(cx).referral_page_visible();
+            visibility.update(cx, |visibility, cx| visibility.set(visible, cx));
+        }
+    };
+
+    project_pref(&store, cx);
+    project_visibility(&host, cx);
+    cx.observe(&store, move |store, cx| project_pref(&store, cx))
+        .detach();
+    cx.observe(&host, move |host, cx| project_visibility(&host, cx))
+        .detach();
 }
 
 /// 主窗口就绪后补弹窗口尚不存在时被跳过的提示：入站配对请求与会话撤销通知（各一次）。

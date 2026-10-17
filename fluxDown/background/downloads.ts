@@ -18,6 +18,7 @@ import {
   resolveSaveDir,
   sendToFluxDown,
   shouldNotifyChannel,
+  withRuleHeaders,
 } from "./sender";
 import { incrementStat } from "./stats";
 import { maybeArmTaskPollForChannel } from "./tasks";
@@ -45,6 +46,8 @@ export async function downloadCandidate(
   const row = allRows(view).find((r) => r.candidate.id === candidateId);
   if (!row) return { success: false, message: "candidate_not_found" };
   const candidate = row.candidate;
+  // DRM 内容下载得到的是无法播放的密文，不发给下载器。
+  if (candidate.protected) return { success: false, message: t("float.protectedHint") };
   const variant = variantId
     ? candidate.variants.find((v) => v.id === variantId)
     : defaultCandidateVariant(candidate);
@@ -52,7 +55,14 @@ export async function downloadCandidate(
 
   // 从嗅探到的资源取回当时的 cookies / headers（requestHeaderCache 可能已过期）。
   const stored = getResources(tabId);
-  const video = findStoredResource(stored, variant.videoUrl);
+  // 播放器没请求过的档（其它清晰度 / 主清单）没有自己的记录：退回同一候选里同域名的资源，
+  // 同一 CDN 上的鉴权头（Referer / Origin / 自定义签名头）通常一致。Cookie 不跨域名借用。
+  const sibling = (url: string) => {
+    const host = hostOf(url);
+    const ids = new Set(candidate.rawResourceIds);
+    return stored.find((r) => ids.has(r.id) && hostOf(r.url) === host && (r.headers || r.cookies));
+  };
+  const video = findStoredResource(stored, variant.videoUrl) ?? sibling(variant.videoUrl);
   const audio =
     variant.audioUrl && sameOrigin(variant.videoUrl, variant.audioUrl)
       ? findStoredResource(stored, variant.audioUrl)
@@ -74,6 +84,24 @@ export async function downloadCandidate(
     message: result.success ? undefined : result.message ?? t("notify.sendFailed"),
     channel: result.channel,
   };
+}
+
+/**
+ * 快捷键「下载正在播放的媒体」：取活动标签页当前播放元素关联的候选（正在播放的档优先），
+ * 结果用系统通知反馈（快捷键没有页面内 UI）。
+ */
+export async function downloadPlayingMedia(): Promise<void> {
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (tab?.id === undefined) return;
+  const view = await buildTabView(tab.id, { withHandoff: false });
+  const row = view.playing.find((r) => r.candidate.downloadable && !r.candidate.protected);
+  if (!row) {
+    const protectedRow = view.playing.find((r) => r.candidate.protected);
+    notify(t("shortcut.downloadTitle"), protectedRow ? t("float.protectedHint") : t("shortcut.noPlayingMedia"));
+    return;
+  }
+  const result = await downloadCandidate(tab.id, row.candidate.id, row.playingVariantId ?? undefined, undefined);
+  if (!result.success) notify(t("shortcut.downloadTitle"), result.message ?? t("notify.sendFailed"));
 }
 
 interface BatchInput {
@@ -167,7 +195,7 @@ async function sendBatch(
         referrer: item.referrer || "",
         filename: item.filename,
         cookies: cookieString,
-        headers: withBrowserUserAgent(extraHeaders),
+        headers: withBrowserUserAgent(withRuleHeaders(item.url, item.referrer || "", extraHeaders)),
         fileSize: item.fileSize,
         mimeType: item.mimeType,
         saveDir: await resolveSaveDir({ url: item.url, referrer: item.referrer, pageHost }),

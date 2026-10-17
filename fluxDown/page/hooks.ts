@@ -21,10 +21,12 @@ import {
   scanForMediaUrls,
   sniffManifestMagic,
 } from "@/utils/media-sniff";
+import { parseHlsPlaylist } from "@/utils/hls-playlist";
 import { isStreamingUrl } from "@/utils/resource-types";
 import {
   EV_CONFIG,
   EV_MEDIA,
+  EV_SHADOW,
   EV_REPORT,
   decodeDetail,
   encodeDetail,
@@ -110,6 +112,7 @@ export function start(): void {
         if (typeof cfg.epoch === "number" && cfg.epoch !== configEpoch) {
           configEpoch = cfg.epoch;
           notified.clear();
+          lastHlsReport.clear();
         }
         applyConfig(cfg);
       }
@@ -142,7 +145,8 @@ export function start(): void {
     return true;
   }
 
-  function notify(via: "fetch" | "xhr", url: string, mime?: string, size?: number): void {
+  /** via `json`：URL 出自响应 JSON 深扫（页面不一定请求），其余为页面实际发出的请求。 */
+  function notify(via: "fetch" | "xhr" | "json", url: string, mime?: string, size?: number): void {
     if (!sniffOn() || !url) return;
     if (!once(`${via}:${url}`)) return;
     dispatchReport({ t: "resource", url, mime, size, via });
@@ -194,9 +198,21 @@ export function start(): void {
     );
   }
 
+  /**
+   * HLS 播放列表：mpegurl 类 CT（含常见的 `audio/mpegurl`、`audio/x-mpegurl`）或 .m3u8 / .m3u。
+   * 正文很小，读出来建立主列表 / 子列表 / 分片的关联。
+   */
+  function isHlsPlaylistResponse(ct: string, url: string): boolean {
+    if (!isHttpUrl(url) || isSkippableCt(ct)) return false;
+    const lower = ct.toLowerCase();
+    if (lower.includes("mpegurl")) return true;
+    if (lower.startsWith("video/") || lower.startsWith("audio/")) return false;
+    return /\.m3u8?(?:[?#]|$)/i.test(url);
+  }
+
   function shouldReadBodyForSniff(ct: string, url: string): boolean {
-    // 清单（.mpd / 清单 MIME）始终读取，供魔数检测
-    if (isDashManifestResponse(ct, url)) return true;
+    // 清单（.mpd / .m3u8 / 清单 MIME）始终读取，供魔数检测与关联解析
+    if (isDashManifestResponse(ct, url) || isHlsPlaylistResponse(ct, url)) return true;
     // 媒体分片不读正文：每个 .m4s/.ts 都 clone 并解码代价过高。无媒体扩展名的
     // octet-stream 仍读（保持旧行为：部分站点以 octet-stream 下发无扩展名的 m3u8）。
     const lower = ct.split(";")[0].trim().toLowerCase();
@@ -213,6 +229,18 @@ export function start(): void {
     dispatchReport({ t: "manifest", manifestUrl, manifest });
   }
 
+  /** 直播播放列表会被反复轮询：关联信息没变就不重复上报。 */
+  const lastHlsReport = new Map<string, string>();
+  function emitHlsPlaylist(text: string, url: string): void {
+    const playlist = parseHlsPlaylist(text, url);
+    if (!playlist) return;
+    const signature = JSON.stringify(playlist);
+    if (lastHlsReport.get(url) === signature) return;
+    if (lastHlsReport.size >= 256) lastHlsReport.clear();
+    lastHlsReport.set(url, signature);
+    dispatchReport({ t: "hls", url, playlist });
+  }
+
   function sniffTextForMedia(text: string, url: string, ct: string, via: "fetch" | "xhr"): void {
     try {
       if (!text) return;
@@ -220,12 +248,13 @@ export function start(): void {
       if (magic) {
         if (magic === "dash-manifest") emitManifest(parseDashXml(text, url), url);
         notify(via, url, magic === "hls-manifest" ? "application/vnd.apple.mpegurl" : "application/dash+xml");
+        if (magic === "hls-manifest") emitHlsPlaylist(text, url);
         return;
       }
       if (text.length <= MAX_SNIFF_CL && looksLikeJson(ct, text)) {
         const obj: unknown = JSON.parse(text);
         emitManifest(parseDashJson(obj, url), url);
-        for (const mediaUrl of scanForMediaUrls(obj, url)) notify(via, mediaUrl);
+        for (const mediaUrl of scanForMediaUrls(obj, url)) notify("json", mediaUrl);
       }
     } catch {
       /* 嗅探异常绝不冒泡 */
@@ -313,6 +342,8 @@ export function start(): void {
     kind: SourceBufferBinding["kind"];
     exact: string[];
     temporal: Map<string, number>;
+    /** 证据所属的导航代数：SPA 换页后复用的 SourceBuffer 不能再把上一页的 URL 当作当前证据。 */
+    epoch: number;
   }
   interface MsInfo {
     id: number;
@@ -361,13 +392,16 @@ export function start(): void {
   function buildDetail(ms: MsInfo, elementless: boolean): MediaDetail {
     const detail: MediaDetail = {
       msId: ms.id,
-      sourceBuffers: ms.sbs.map((sb) => ({
-        sbId: sb.sbId,
-        mime: sb.mime,
-        kind: sb.kind,
-        exact: sb.exact.slice(),
-        temporal: [...sb.temporal.entries()].map(([url, count]) => ({ url, count })),
-      })),
+      sourceBuffers: ms.sbs.map((sb) => {
+        const current = sb.epoch === configEpoch;
+        return {
+          sbId: sb.sbId,
+          mime: sb.mime,
+          kind: sb.kind,
+          exact: current ? sb.exact.slice() : [],
+          temporal: current ? [...sb.temporal.entries()].map(([url, count]) => ({ url, count })) : [],
+        };
+      }),
     };
     if (elementless) detail.elementless = true;
     return detail;
@@ -433,6 +467,11 @@ export function start(): void {
   function onAppend(sb: object, data: unknown): void {
     const info = sbInfo.get(sb);
     if (!info) return;
+    if (info.epoch !== configEpoch) {
+      info.epoch = configEpoch;
+      info.exact = [];
+      info.temporal = new Map();
+    }
     const tags = tagsOf(data);
     if (tags && tags.size > 0) {
       for (const url of tags) {
@@ -492,24 +531,40 @@ export function start(): void {
   // ===== history：SPA 路由变化 =====
 
   let lastHref = location.href;
-  const notifyPageUrl = (): void => {
+  const notifyPageUrl = (kind: "push" | "replace" | "pop"): void => {
     if (location.href === lastHref) return;
+    const from = lastHref;
     lastHref = location.href;
-    dispatchReport({ t: "pageUrl" });
+    dispatchReport({ t: "pageUrl", kind, from });
   };
   wrapMethod(history, "pushState", (orig) =>
     function (this: unknown, ...args: unknown[]) {
       const r = orig.apply(this, args);
-      notifyPageUrl();
+      notifyPageUrl("push");
       return r;
     });
   wrapMethod(history, "replaceState", (orig) =>
     function (this: unknown, ...args: unknown[]) {
       const r = orig.apply(this, args);
-      notifyPageUrl();
+      notifyPageUrl("replace");
       return r;
     });
-  window.addEventListener("popstate", notifyPageUrl);
+  window.addEventListener("popstate", () => notifyPageUrl("pop"));
+  // hash 路由（`#/video/1` → `#/video/2`）不经过 history API；是否算换页由 page-nav 按 hash 形态判定
+  window.addEventListener("hashchange", () => notifyPageUrl("push"));
+
+  // ===== shadow DOM：通知 ISOLATED 观察新挂的 shadow root 里的媒体元素 =====
+  wrapMethod(Element.prototype, "attachShadow", (orig) =>
+    function (this: Element, ...args: unknown[]) {
+      const root = orig.apply(this, args);
+      try {
+        // 未连接的宿主（构造函数里 attach）由 ISOLATED 的 MutationObserver 在插入时发现
+        if (this.isConnected) this.dispatchEvent(new CustomEvent(EV_SHADOW, { bubbles: true, composed: true, detail: "" }));
+      } catch {
+        /* 通知失败无妨 */
+      }
+      return root;
+    });
 
   // ===== fetch =====
 
@@ -543,6 +598,16 @@ export function start(): void {
     };
   }
 
+  /**
+   * 资源总大小：206 分段响应的 Content-Length 只是本段长度，取 Content-Range 的总长；
+   * 跨域响应读不到 Content-Range 时视为未知，避免把几 KB 的分段长度当成文件大小。
+   */
+  function fileSizeOf(status: number, contentLength: number | undefined, contentRange: string | null): number | undefined {
+    if (status !== 206) return contentLength;
+    const total = contentRange ? /\/\s*(\d+)\s*$/.exec(contentRange) : null;
+    return total ? parseInt(total[1], 10) : undefined;
+  }
+
   function onFetchResponse(response: Response, requestUrl: string): void {
     const ct = response.headers.get("content-type") || "";
     const clRaw = response.headers.get("content-length");
@@ -554,7 +619,9 @@ export function start(): void {
     let watchClone: Response | null = null;
     let ids: string[] = [];
     if (sniffOn()) {
-      if (ct && isReportableCt(ct, finalUrl)) notify("fetch", finalUrl, ct, cl);
+      if (ct && isReportableCt(ct, finalUrl)) {
+        notify("fetch", finalUrl, ct, fileSizeOf(response.status, cl, response.headers.get("content-range")));
+      }
       if (finalUrl && finalUrl !== requestUrl && isStreamingUrl(finalUrl)) {
         notify("fetch", finalUrl, ct || streamMime(finalUrl));
       }
@@ -630,7 +697,11 @@ export function start(): void {
 
       if (!sniffOn()) return;
       if (ct && isReportableCt(ct, responseUrl)) {
-        notify("xhr", responseUrl, ct, cl ? parseInt(cl, 10) : undefined);
+        // getAllResponseHeaders 只返回可读的头，不会像 getResponseHeader 那样在控制台报 "unsafe header"
+        const range = this.status === 206
+          ? /^content-range:\s*(.+)$/im.exec(this.getAllResponseHeaders())?.[1] ?? null
+          : null;
+        notify("xhr", responseUrl, ct, fileSizeOf(this.status, cl ? parseInt(cl, 10) : undefined, range));
       }
       if (responseUrl !== url && isStreamingUrl(responseUrl)) {
         notify("xhr", responseUrl, ct || streamMime(responseUrl));
@@ -641,12 +712,15 @@ export function start(): void {
           sniffTextForMedia(this.responseText, responseUrl, ct, "xhr");
         } else if (rt === "json" && this.response && typeof this.response === "object") {
           emitManifest(parseDashJson(this.response, responseUrl), responseUrl);
-          for (const mediaUrl of scanForMediaUrls(this.response, responseUrl)) notify("xhr", mediaUrl);
+          for (const mediaUrl of scanForMediaUrls(this.response, responseUrl)) notify("json", mediaUrl);
         } else if (rt === "arraybuffer" && this.response instanceof ArrayBuffer) {
           const prefix = new Uint8Array(this.response).subarray(0, 512);
           const magic = sniffManifestMagic(new TextDecoder().decode(prefix));
           if (magic) {
             notify("xhr", responseUrl, magic === "hls-manifest" ? "application/vnd.apple.mpegurl" : "application/dash+xml");
+          }
+          if (magic === "hls-manifest" && this.response.byteLength <= MAX_SNIFF_READ) {
+            emitHlsPlaylist(new TextDecoder().decode(this.response), responseUrl);
           }
         }
       }
@@ -823,6 +897,13 @@ export function start(): void {
             const oldest = msByObjectUrl.keys().next().value;
             if (oldest !== undefined) msByObjectUrl.delete(oldest);
           }
+        } else if (typeof Blob !== "undefined" && obj instanceof Blob && /^(?:video|audio)\//i.test(obj.type || "video/")) {
+          // 整段下载后再交给 <video src=blob:>：Blob 带着来源标记时，把 blob URL 还原成原始地址
+          const sources = tagsOf(obj);
+          if (sources && sources.size === 1) {
+            const [source] = sources;
+            dispatchReport({ t: "blob", blobUrl: url, url: source });
+          }
         }
       } catch {
         /* ignore */
@@ -862,6 +943,7 @@ export function start(): void {
             kind: lower.startsWith("video") ? "video" : lower.startsWith("audio") ? "audio" : "unknown",
             exact: [],
             temporal: new Map(),
+            epoch: configEpoch,
           };
           ms.sbs.push(info);
           sbInfo.set(sb, info);
@@ -881,5 +963,48 @@ export function start(): void {
         }
         return orig.apply(this, args);
       });
+  }
+
+  // ===== Service Worker 作用域：识别 SW 合成的下载 =====
+  // 流式保存、网盘、网页 IM 等下载可由页面 SW 在浏览器内合成 http(s) 响应，引擎按 URL
+  // 重放只会拿到 404 / 网页。上报本源 SW 作用域，background 据此要求作用域内的下载必须
+  // 有真实网络请求才接管。与嗅探开关无关：它服务于下载拦截的正确性。
+  const reportedScopes = new Set<string>();
+  function reportScopes(result: unknown): void {
+    for (const reg of Array.isArray(result) ? result : [result]) {
+      const scope = (reg as { scope?: unknown } | null | undefined)?.scope;
+      if (typeof scope !== "string" || !isHttpUrl(scope) || reportedScopes.has(scope)) continue;
+      reportedScopes.add(scope);
+      dispatchReport({ t: "swScope", scope });
+    }
+  }
+  if (typeof ServiceWorkerContainer !== "undefined") {
+    for (const key of ["register", "getRegistration", "getRegistrations"]) {
+      wrapMethod(ServiceWorkerContainer.prototype, key, (orig) =>
+        function (this: ServiceWorkerContainer, ...args: unknown[]) {
+          const p = orig.apply(this, args);
+          if (!(p instanceof Promise)) return p;
+          // 返回镜像原结果的派生 Promise：成功值与拒绝原因不变，页面未处理的拒绝照旧上抛
+          return p.then((result: unknown) => {
+            try {
+              reportScopes(result);
+            } catch {
+              /* ignore */
+            }
+            return result;
+          });
+        });
+    }
+    try {
+      // 已受控的文档（常见于再次访问：页面不会再调 register）：主动查一次本文档的注册
+      const container = navigator.serviceWorker;
+      if (container?.controller) {
+        container.getRegistration().then(reportScopes, () => {
+          /* 查询失败：不上报 */
+        });
+      }
+    } catch {
+      /* 沙箱 iframe 读取 navigator.serviceWorker 会抛 SecurityError */
+    }
   }
 }

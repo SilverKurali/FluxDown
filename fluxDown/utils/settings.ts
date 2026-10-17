@@ -74,6 +74,8 @@ export interface FluxDownSettings {
   showPageDot: boolean;
   /** 视频浮钮触发方式：hover = 悬停在播放器上时显示；always = 正在播放的视频常显 */
   floatButtonTrigger: "hover" | "always";
+  /** 视频浮钮贴在播放元素的哪个角 */
+  floatButtonPosition: "top-right" | "top-left" | "bottom-right" | "bottom-left";
   /** 是否在资源列表中显示低置信度项 */
   showLowConfidence: boolean;
 
@@ -250,6 +252,7 @@ const DEFAULT_SETTINGS: FluxDownSettings = {
   showFloatingButton: true,
   showPageDot: true,
   floatButtonTrigger: "hover",
+  floatButtonPosition: "top-right",
   showLowConfidence: false,
   sniffImages: false,
 

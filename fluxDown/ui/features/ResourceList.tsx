@@ -185,7 +185,9 @@ export function ResourceList(props: Props): JSX.Element {
     });
 
   const visibleKeys = [
-    ...[...playing, ...others, ...unbound].filter((r) => r.candidate.downloadable).map((r) => candKey(r.candidate.id)),
+    ...[...playing, ...others, ...unbound]
+      .filter((r) => r.candidate.downloadable && !r.candidate.protected)
+      .map((r) => candKey(r.candidate.id)),
     ...files.map((f) => resKey(f.resource.id)),
   ];
   const allChecked = visibleKeys.length > 0 && visibleKeys.every((k) => selected.has(k));
@@ -271,11 +273,17 @@ export function ResourceList(props: Props): JSX.Element {
     if (v) {
       metaParts.push(variantLabel(t, v));
       if (v.codec) metaParts.push(v.codec);
+      if (v.audioUrl) metaParts.push(t("float.audioVideo"));
       if (v.fileSize && v.fileSize > 0) metaParts.push(formatBytes(v.fileSize));
     }
     if (c.variants.length > 1) metaParts.push(t("list.variantCount", { count: String(c.variants.length) }));
     if (withSubs && subtitleLangs.length) metaParts.push(`${t("list.subtitles")} ${subtitleLangs.join("/")}`);
     const isPlaying = row.playingVariantId !== null && row.binding !== "none";
+    const metaText = c.protected
+      ? t("float.protectedHint")
+      : c.downloadable
+        ? metaParts.join(" · ")
+        : t("panel.videoNeedsManifest");
     return (
       <div class="fd-row-wrap" key={key}>
         <div class={`fd-row${selected.has(key) ? " fd-selected" : ""}`}>
@@ -283,7 +291,7 @@ export function ResourceList(props: Props): JSX.Element {
             type="checkbox"
             class="fd-check"
             checked={selected.has(key)}
-            disabled={!c.downloadable}
+            disabled={!c.downloadable || c.protected === true}
             onChange={(e) => toggle(key, (e.currentTarget as HTMLInputElement).checked)}
           />
           <Icon kind="video" size={18} />
@@ -291,15 +299,15 @@ export function ResourceList(props: Props): JSX.Element {
             <div class="fd-row-title" title={c.title}>
               {c.title}
             </div>
-            <div class="fd-row-meta">
-              {c.downloadable ? metaParts.join(" · ") : t("panel.videoNeedsManifest")}
+            <div class="fd-row-meta" title={metaText}>
+              {metaText}
             </div>
           </div>
           {isPlaying ? <Badge tone="accent">{t("list.playing")}</Badge> : null}
           <IconButton
             icon="download"
             label={t("panel.download")}
-            disabled={busy || !c.downloadable}
+            disabled={busy || !c.downloadable || c.protected === true}
             onClick={() => void downloadRow(row)}
           />
           <div class="fd-menu-anchor" data-menu>
@@ -362,10 +370,10 @@ export function ResourceList(props: Props): JSX.Element {
           />
           <Icon resourceType={r.type} size={18} />
           <div class="fd-row-main">
-            <div class="fd-row-title" title={r.url}>
+            <div class="fd-row-title" title={`${name}\n${r.url}`}>
               {name}
             </div>
-            <div class="fd-row-meta">{meta.join(" · ")}</div>
+            <div class="fd-row-meta" title={meta.join(" · ")}>{meta.join(" · ")}</div>
           </div>
           {r.confidence === "low" ? <Badge tone="warning">{t("list.lowConfidence")}</Badge> : null}
           <IconButton

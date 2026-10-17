@@ -123,3 +123,25 @@ describe("validatePack 整包", () => {
     expect(() => validatePack({ ...pack("local", []), format: "x" } as never, "local")).toThrow(PackRejectedError);
   });
 });
+
+describe("page / request / mirror / manifest 规则校验", () => {
+  const check = (r: SniffRuleV1) => validatePack(pack(r.tier, [r]), r.tier).rejected;
+
+  test("headers 不允许设置凭据类请求头，且必须限定 host", () => {
+    expect(check(rule({ id: "official.h1", tier: "official", stage: "request", match: { host: ["a.com"] }, action: { kind: "headers", set: { Cookie: "x" } } }))).toHaveLength(1);
+    expect(check(rule({ id: "official.h2", tier: "official", stage: "request", match: {}, action: { kind: "headers", set: { Referer: "https://a.com/" } } }))).toHaveLength(1);
+    expect(check(rule({ id: "official.h3", tier: "official", stage: "request", match: { host: ["a.com"] }, action: { kind: "headers", set: { Referer: "https://a.com/" } } }))).toHaveLength(0);
+  });
+
+  test("page 规则：非本地规则必须限定页面；player.float 只接受 hide", () => {
+    expect(check(rule({ id: "community.t1", tier: "community", stage: "page", match: {}, action: { kind: "title", selector: ".t" } }))).toHaveLength(1);
+    expect(check(rule({ id: "official.p1", tier: "official", stage: "page", match: { pageHost: ["a.com"] }, action: { kind: "player", selector: ".ad", float: "show" as "hide" } }))).toHaveLength(1);
+    expect(check(rule({ id: "official.p2", tier: "official", stage: "page", match: { pageHost: ["a.com"] }, action: { kind: "player", selector: ".ad", float: "hide" } }))).toHaveLength(0);
+  });
+
+  test("mirror 至少两个合法 host；manifest 的 path 必须是字符串", () => {
+    expect(check(rule({ id: "official.m1", tier: "official", stage: "normalize", match: {}, action: { kind: "mirror", hosts: ["a.com"] } }))).toHaveLength(1);
+    expect(check(rule({ id: "official.m2", tier: "official", stage: "normalize", match: {}, action: { kind: "mirror", hosts: ["a.com", "b.net"] } }))).toHaveLength(0);
+    expect(check(rule({ id: "official.b1", tier: "official", stage: "body", match: { url: ["*/api*"] }, action: { kind: "manifest", path: 3 as unknown as string } }))).toHaveLength(1);
+  });
+});

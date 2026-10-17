@@ -146,6 +146,7 @@ public enum HostMethod {
     public static let agentRemoteReconnect = "agent.remote.reconnect"
     public static let agentDeviceRename = "agent.device.rename"
     public static let agentDeviceDelete = "agent.device.delete"
+    public static let agentDeviceDisconnect = "agent.device.disconnect"
     public static let agentPreferencesPatch = "agent.preferences.patch"
     public static let agentSyncGet = "agent.sync.get"
     public static let agentSyncEnable = "agent.sync.enable"

@@ -1,6 +1,7 @@
 /** 规则包校验：整包不合格抛 PackRejectedError，单条不合格则剔除。 */
 import { parseHostPattern } from "./glob";
 import {
+  FORBIDDEN_RULE_HEADERS,
   RULE_ENGINE_VERSION,
   STAGE_ACTIONS,
   TIER_RANK,
@@ -193,6 +194,36 @@ function checkRule(rule: SniffRuleV1, expectedTier: RuleTier): string | null {
       if (typeof a.attr !== "string") return "attr 缺失";
       const err = checkEmit(a.emit, new Set(["value", "text"]), rule.tier);
       if (err) return err;
+      break;
+    }
+    case "manifest":
+      if (a.path !== undefined && typeof a.path !== "string") return "manifest.path 须为字符串";
+      break;
+    case "mirror":
+      if (!Array.isArray(a.hosts) || a.hosts.length < 2) return "mirror.hosts 至少两个";
+      for (const h of a.hosts) {
+        if (typeof h !== "string" || !parseHostPattern(h)) return "mirror.hosts 非法";
+      }
+      break;
+    case "title":
+    case "player": {
+      const sel = checkSelector(a.selector);
+      if (sel) return sel;
+      if (a.kind === "title" && a.attr !== undefined && typeof a.attr !== "string") return "attr 须为字符串";
+      if (a.kind === "player" && a.float !== "hide") return "player.float 非法";
+      if (!hasHost(rule.match) && rule.tier !== "local") return "page 规则必须限定 host 或 pageHost";
+      break;
+    }
+    case "headers": {
+      if (!a.set || typeof a.set !== "object" || Array.isArray(a.set)) return "headers.set 缺失";
+      const entries = Object.entries(a.set);
+      if (entries.length === 0 || entries.length > 16) return "headers.set 数量非法";
+      for (const [name, value] of entries) {
+        if (!/^[a-z0-9-]{1,64}$/i.test(name)) return "header 名非法";
+        if (FORBIDDEN_RULE_HEADERS.has(name.toLowerCase())) return `不允许设置 ${name}`;
+        if (typeof value !== "string" || value.length > 1024 || /[\r\n]/.test(value)) return "header 值非法";
+      }
+      if (!hasHost(rule.match)) return "headers 规则必须限定 host 或 pageHost";
       break;
     }
   }

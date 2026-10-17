@@ -293,7 +293,7 @@ export function finalizeLocalRule(draft: unknown, opts: FinalizeOptions): CheckR
   return checkLocalRule(rule, opts.now);
 }
 
-/** 新建规则时 JSON 模式的初始骨架（body / dom 只能在 JSON 模式编写）。 */
+/** 新建规则时 JSON 模式的初始骨架（body / dom / page / request 只能在 JSON 模式编写）。 */
 export function ruleTemplate(stage: SniffRuleV1["stage"], id: string): SniffRuleV1 {
   const base = { id, version: 1, tier: "local" as const };
   if (stage === "body") {
@@ -320,6 +320,22 @@ export function ruleTemplate(stage: SniffRuleV1["stage"], id: string): SniffRule
         attr: "href",
         emit: { mode: "resource", url: "${value}" },
       },
+    };
+  }
+  if (stage === "page") {
+    return {
+      ...base,
+      stage,
+      match: { pageHost: ["example.com"] },
+      action: { kind: "title", selector: ".video-title" },
+    };
+  }
+  if (stage === "request") {
+    return {
+      ...base,
+      stage,
+      match: { host: ["cdn.example.com"] },
+      action: { kind: "headers", set: { referer: "https://www.example.com/" } },
     };
   }
   return {

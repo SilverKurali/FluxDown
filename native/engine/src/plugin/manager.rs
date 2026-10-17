@@ -1076,7 +1076,19 @@ impl PluginManager {
 
     /// 从 zip 字节安装。
     pub async fn install_from_zip(&self, bytes: Vec<u8>) -> Result<String, PluginError> {
-        let outcome = super::install::install_from_zip_with_backup(&self.root, &bytes)?;
+        let outcome = super::install::install_from_zip_with_backup(&self.root, &bytes, |_| Ok(()))?;
+        self.finish_install_outcome(outcome).await
+    }
+
+    /// 与 [`Self::install_from_zip`] 相同，但在 manifest 校验通过后、替换旧版本前
+    /// 先运行 `check_manifest`（市场安装用它核对包内 manifest 与索引条目一致）。
+    pub(crate) async fn install_from_zip_checked(
+        &self,
+        bytes: Vec<u8>,
+        check_manifest: impl FnOnce(&super::manifest::PluginManifest) -> Result<(), PluginError>,
+    ) -> Result<String, PluginError> {
+        let outcome =
+            super::install::install_from_zip_with_backup(&self.root, &bytes, check_manifest)?;
         self.finish_install_outcome(outcome).await
     }
 

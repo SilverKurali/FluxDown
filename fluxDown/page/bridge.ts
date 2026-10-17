@@ -6,19 +6,31 @@
  * 失败即丢弃。
  */
 
+import type { HlsPlaylistInfo } from "@/utils/hls-playlist";
+
 /** MAIN → ISOLATED，在 document 上派发。 */
 export const EV_REPORT = "__fluxdown_report";
 /** ISOLATED → MAIN，在 document 上派发。 */
 export const EV_CONFIG = "__fluxdown_config";
 /** MAIN 在媒体元素上派发（composed: true，bubbles: false）；无元素时在 document 上派发并带 elementless。 */
 export const EV_MEDIA = "__fluxdown_media";
+/**
+ * MAIN 在 shadow 宿主上派发（bubbles + composed）：页面刚给已连接的元素挂了 shadow root，
+ * ISOLATED 据此观察其中的媒体元素（closed root 由内容脚本 API 读取）。detail 为空串。
+ */
+export const EV_SHADOW = "__fluxdown_shadow";
 
 export type ReportDetail =
-  | { t: "resource"; url: string; mime?: string; size?: number; via: "fetch" | "xhr" }
+  | { t: "resource"; url: string; mime?: string; size?: number; via: "fetch" | "xhr" | "json" }
   | { t: "manifest"; manifestUrl: string; manifest: unknown }
   | { t: "body"; url: string; ruleIds: string[]; text: string }
   | { t: "preempt"; url: string; filename?: string }
-  | { t: "pageUrl" };
+  | { t: "pageUrl"; kind: "push" | "replace" | "pop"; from: string }
+  | { t: "hls"; url: string; playlist: HlsPlaylistInfo }
+  /** `URL.createObjectURL(blob)` 的 blob 来自某个响应（来源标记唯一）：blob URL ↔ 原始地址。 */
+  | { t: "blob"; blobUrl: string; url: string }
+  /** 本源已注册的 Service Worker 作用域（识别 SW 合成的下载，见 utils/download-source.ts）。 */
+  | { t: "swScope"; scope: string };
 
 export interface SourceBufferBinding {
   sbId: number;
@@ -43,6 +55,12 @@ export interface PageConfig {
   dom: { ruleId: string; selector: string; attr: string }[];
   floatButton: boolean;
   floatTrigger: "hover" | "always";
+  /** 浮钮贴在播放元素的哪个角。 */
+  floatPosition: "top-right" | "top-left" | "bottom-right" | "bottom-left";
+  /** page 规则：播放元素标题来源（取离元素最近的匹配节点）。 */
+  titles: { selector: string; attr?: string }[];
+  /** page 规则：这些容器内的媒体元素不显示浮钮。 */
+  floatExclude: string[];
   pageDot: boolean;
   frameIsTop: boolean;
   /** 是否接管本页 magnet 链接点击：settings.enabled && settings.interceptMagnet && 站点 intercept !== "never"。 */

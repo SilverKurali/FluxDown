@@ -6,8 +6,12 @@
  * `classify` → `resource-policy` → 淘汰。
  */
 import { browser } from "wxt/browser";
+import { hostOf } from "@/rules/url";
 import { normalizeDashManifest } from "@/utils/dash-manifest";
+import { isPageChange, pageUrlKey, type PageUrlChangeKind } from "@/utils/page-nav";
 import type { DashManifest } from "@/utils/dash-manifest";
+import { isManifestUrl, type DashManifestEntry } from "@/utils/media-candidates";
+import type { HlsPlaylistEntry, HlsPlaylistInfo } from "@/utils/hls-playlist";
 import { extractFilenameFromUrl } from "@/utils/resource-types";
 import type {
   ConfidenceLevel,
@@ -17,7 +21,7 @@ import type {
 import type { ElementState } from "./protocol";
 import { computeConfidence, isWorthShowing } from "./resource-policy";
 import { getEngine } from "./rules-store";
-import { mergeRestoredTab, pageUrlKey } from "./tab-restore";
+import { mergeRestoredTab } from "./tab-restore";
 import type { PersistedTab } from "./tab-restore";
 
 const CONFIDENCE_ORDER: Record<ConfidenceLevel, number> = { high: 3, medium: 2, low: 1 };
@@ -25,14 +29,35 @@ const CONFIDENCE_ORDER: Record<ConfidenceLevel, number> = { high: 3, medium: 2, 
 /** 每 tab 资源硬上限：防深扫 / 长会话 SPA 累积把内存与排序成本推高。 */
 const MAX_RESOURCES_PER_TAB = 500;
 const MAX_MANIFESTS_PER_TAB = 8;
+/**
+ * 分片类资源（m4s / ts 等、小于阈值的音视频）的单独上限：直播 / 长视频会持续产生分片，
+ * 不能让它们挤掉页面里其它可下载资源；最新的分片已足够把播放元素关联到候选。
+ */
+const MAX_SEGMENTS_PER_TAB = 150;
+const MAX_HLS_PLAYLISTS_PER_TAB = 64;
 const MAX_PERSISTED_RESOURCES = 200;
 const PERSIST_DEBOUNCE_MS = 1_000;
 const SESSION_KEY_PREFIX = "fluxdown_tab_";
 
 interface TabState {
+  /** 最新的页面 URL（含 replaceState 改写后的 query）。 */
   pageUrl: string;
+  /** 当前嗅探投影开始时的页面 URL；为空表示尚未登记。 */
+  navUrl: string;
+  /** 属于当前投影的页面 URL 键（navUrl 及其后未换页的 replaceState 改写）。 */
+  pageKeys: Set<string>;
   resources: Map<string, DetectedResource>;
   manifests: Map<string, DashManifest>;
+  /**
+   * 换页前就已存在的清单键。播放器常在换页（SPA 跳转 / 自动连播）之前预取下一个视频的清单，
+   * 换页清空会把它丢掉且不再上报；保留一代并标记为「换页前」，只在关联到播放元素后展示。
+   */
+  carriedManifests: Set<string>;
+  /**
+   * HLS 播放列表 URL 键 → 关联信息（子列表、分片目录）。只描述 URL 之间的关系、不生成候选，
+   * 换页不清空：播放器可能在换页前就取到下一个视频的播放列表。
+   */
+  hlsPlaylists: Map<string, HlsPlaylistInfo>;
   elements: Map<string, ElementState>;
   frames: Set<number>;
   /** 最近一次右键命中的媒体元素 key。 */
@@ -48,8 +73,12 @@ function stateOf(tabId: number): TabState {
   if (!state) {
     state = {
       pageUrl: "",
+      navUrl: "",
+      pageKeys: new Set(),
       resources: new Map(),
       manifests: new Map(),
+      carriedManifests: new Set(),
+      hlsPlaylists: new Map(),
       elements: new Map(),
       frames: new Set(),
       contextTarget: null,
@@ -83,29 +112,62 @@ export function getTabPageUrl(tabId: number): string {
   return tabs.get(tabId)?.pageUrl ?? "";
 }
 
-/** 清空一个 tab 的嗅探投影；`keepFrames` 用于 SPA 内导航（pushState）。 */
-export function clearTab(tabId: number, keepFrames = false): void {
+/**
+ * 清空一个 tab 的嗅探投影；`keepFrames` 用于同文档导航（SPA 路由）。
+ * `carryManifests`：同站换页时把现有清单留作换页前清单（见 carriedManifests），跨站则全部丢弃。
+ */
+function clearTab(tabId: number, keepFrames: boolean, carryManifests: boolean): void {
   const state = tabs.get(tabId);
   if (!state) return;
+  // 播放清单资源（.m3u8 / .mpd）同样保留一代：HLS 主列表在换页前预取时，换页后的分片要靠它归属。
+  const carriedResources = carryManifests
+    ? [...state.resources.values()].filter((r) => !r.carried && isManifestUrl(r.url, r.mimeType))
+    : [];
   state.resources.clear();
-  state.manifests.clear();
+  for (const resource of carriedResources) state.resources.set(resource.id, { ...resource, carried: true });
+  // 已经跨过一次换页的清单不再保留；其余标记为换页前清单。
+  for (const key of state.carriedManifests) state.manifests.delete(key);
+  if (!carryManifests) state.manifests.clear();
+  state.carriedManifests = new Set(state.manifests.keys());
   state.elements.clear();
   state.contextTarget = null;
   if (!keepFrames) state.frames.clear();
   touch(tabId);
 }
 
-/** 同步 tab 的页面 URL；换页时清空投影。pushState 导航由 sensor 的 pageUrlChanged 触发。 */
-export function syncTabPageUrl(tabId: number, pageUrl: string, keepFrames = false): void {
+/**
+ * 同步 tab 的页面 URL；换页（见 `isPageChange`）时清空投影。
+ *
+ * push / pop / document 以「URL 键不属于当前投影」判定，因为 tabs.onUpdated 可能先到并已
+ * 改写 `pageUrl`；replace / tab 只看路径是否离开投影起点。replaceState 未换页时把新键并入
+ * 投影，旧 URL 下发出的上报仍被接受。
+ */
+export function syncTabPageUrl(tabId: number, pageUrl: string, kind: PageUrlChangeKind): void {
   if (!pageUrl) return;
   const state = stateOf(tabId);
+  const key = pageUrlKey(pageUrl);
+  const changed =
+    state.navUrl !== "" &&
+    (kind === "replace" || kind === "tab" ? isPageChange(kind, state.navUrl, pageUrl) : !state.pageKeys.has(key));
   const previous = state.pageUrl;
+  const previousNav = state.navUrl;
   state.pageUrl = pageUrl;
-  if (previous && pageUrlKey(previous) !== pageUrlKey(pageUrl)) {
-    clearTab(tabId, keepFrames);
-  } else if (previous !== pageUrl) {
-    touch(tabId);
+  if (state.navUrl === "" || changed) {
+    state.navUrl = pageUrl;
+    state.pageKeys = new Set([key]);
+  } else if (kind !== "tab") {
+    // tabs.onUpdated 可能是 query 级整页导航的前奏：不并入，等 content 的 push / document 判定。
+    state.pageKeys.add(key);
   }
+  if (changed) clearTab(tabId, kind !== "tab", hostOf(previousNav) === hostOf(pageUrl));
+  else if (previous !== pageUrl) touch(tabId);
+}
+
+/** 上报所属页面是否属于当前嗅探投影（空 URL 视为属于）。 */
+export function isCurrentPage(tabId: number, pageUrl: string): boolean {
+  const state = tabs.get(tabId);
+  if (!pageUrl || !state || state.navUrl === "") return true;
+  return state.pageKeys.has(pageUrlKey(pageUrl));
 }
 
 /** 关闭 tab：丢弃内存状态、取消待写的持久化并清掉会话快照。不通知变更订阅者（tab 已不存在，无视图可刷新）。 */
@@ -139,6 +201,8 @@ export function clearResourcesOnly(tabId: number): void {
   if (!state) return;
   state.resources.clear();
   state.manifests.clear();
+  state.carriedManifests.clear();
+  state.hlsPlaylists.clear();
   touch(tabId);
 }
 
@@ -171,6 +235,23 @@ function completeFilename(url: string, pageUrl: string, filename: string | undef
   return ext ? `${base}.${ext}` : base;
 }
 
+const SEGMENT_EXT_RE = /\.(?:m4s|ts|m4v|m4a|cmfv|cmfa|aac)(?:[?#]|$)/i;
+
+/** 分片类资源：媒体分片扩展名，或小于阈值（low）的音视频 / 流。 */
+function isSegmentLike(resource: DetectedResource): boolean {
+  if (resource.type !== "video" && resource.type !== "audio" && resource.type !== "stream") return false;
+  if (isManifestUrl(resource.url, resource.mimeType)) return false;
+  return SEGMENT_EXT_RE.test(resource.url) || resource.confidence === "low";
+}
+
+/** 分片类资源超过 `keep` 条时按检测时间淘汰最旧的。 */
+function evictOldestSegments(map: Map<string, DetectedResource>, keep: number): void {
+  const segments = [...map.values()].filter(isSegmentLike);
+  if (segments.length <= keep) return;
+  segments.sort((a, b) => a.detectedAt - b.detectedAt);
+  for (const victim of segments.slice(0, segments.length - keep)) map.delete(victim.id);
+}
+
 function evictLowest(map: Map<string, DetectedResource>): void {
   let victimKey: string | undefined;
   let victimScore = Infinity;
@@ -194,22 +275,49 @@ function mergeRuleIds(existing: DetectedResource, ruleIds: string[] | undefined)
   return true;
 }
 
+/** 合并重复命中的资源；返回是否有字段真的变化（同一分片 / Range 的重复请求通常没有）。 */
 function mergeResource(
   existing: DetectedResource,
   incoming: ResourceMessagePayload,
   ctx: IngestContext,
-): void {
+): boolean {
+  let changed = false;
   if (existing.type === "other" && incoming.type && incoming.type !== "other") {
     existing.type = incoming.type;
+    changed = true;
   }
-  if (!existing.filename && incoming.filename) existing.filename = incoming.filename;
-  if (existing.size <= 0 && incoming.size && incoming.size > 0) existing.size = incoming.size;
-  if (!existing.mimeType && incoming.mimeType) existing.mimeType = incoming.mimeType;
-  if (!existing.quality && incoming.quality) existing.quality = incoming.quality;
-  if (incoming.isAttachment) existing.isAttachment = true;
-  if (!existing.lang && incoming.lang) existing.lang = incoming.lang;
-  if (!existing.label && incoming.label) existing.label = incoming.label;
-  if (!existing.elementKey && incoming.elementKey) existing.elementKey = incoming.elementKey;
+  if (!existing.filename && incoming.filename) {
+    existing.filename = incoming.filename;
+    changed = true;
+  }
+  if (existing.size <= 0 && incoming.size && incoming.size > 0) {
+    existing.size = incoming.size;
+    changed = true;
+  }
+  if (!existing.mimeType && incoming.mimeType) {
+    existing.mimeType = incoming.mimeType;
+    changed = true;
+  }
+  if (!existing.quality && incoming.quality) {
+    existing.quality = incoming.quality;
+    changed = true;
+  }
+  if (incoming.isAttachment && !existing.isAttachment) {
+    existing.isAttachment = true;
+    changed = true;
+  }
+  if (!existing.lang && incoming.lang) {
+    existing.lang = incoming.lang;
+    changed = true;
+  }
+  if (!existing.label && incoming.label) {
+    existing.label = incoming.label;
+    changed = true;
+  }
+  if (!existing.elementKey && incoming.elementKey) {
+    existing.elementKey = incoming.elementKey;
+    changed = true;
+  }
   // 同一媒体路径的签名/token 轮换会归并为同一 id：以最新 URL 与认证头为准，
   // 否则下载用的是已过期的首次链接。
   if (incoming.url !== existing.url) {
@@ -217,20 +325,39 @@ function mergeResource(
     existing.detectedAt = Date.now();
     if (ctx.cookies) existing.cookies = ctx.cookies;
     if (ctx.headers && Object.keys(ctx.headers).length > 0) existing.headers = ctx.headers;
+    changed = true;
   }
-  if (ctx.cookies && !existing.cookies) existing.cookies = ctx.cookies;
+  if (ctx.cookies && !existing.cookies) {
+    existing.cookies = ctx.cookies;
+    changed = true;
+  }
   if (ctx.headers && Object.keys(ctx.headers).length > 0 && !existing.headers) {
     existing.headers = ctx.headers;
+    changed = true;
   }
-  mergeRuleIds(existing, ctx.ruleIds);
+  if (mergeRuleIds(existing, ctx.ruleIds)) changed = true;
+  // 只在 API JSON 里出现过的地址后来被页面真正请求：按真实请求重新评估可信度。
+  if (existing.detectedBy === "api-scan" && incoming.detectedBy !== "api-scan") {
+    existing.detectedBy = incoming.detectedBy;
+    changed = true;
+  }
+  // 换页后页面又请求了这份清单：它属于当前页
+  if (existing.carried) {
+    delete existing.carried;
+    changed = true;
+  }
 
   // 重新计算可信度（信息更丰富后可能升级）
   const next = computeConfidence(existing.type, existing.size, existing.detectedBy, existing.isAttachment);
-  if (CONFIDENCE_ORDER[next] > CONFIDENCE_ORDER[existing.confidence]) existing.confidence = next;
+  if (CONFIDENCE_ORDER[next] > CONFIDENCE_ORDER[existing.confidence]) {
+    existing.confidence = next;
+    changed = true;
+  }
+  return changed;
 }
 
 /**
- * 入库一批资源；返回新增数量。任何新增 / 合并都会通知订阅者。
+ * 入库一批资源；返回新增数量。新增或合并出变化时才通知订阅者（持久化、视图重建、徽标）。
  * blob:/data: 在此处丢弃（magnet 例外）。
  */
 export function ingestResources(
@@ -253,8 +380,7 @@ export function ingestResources(
     const id = engine.dedupeKey(url, effectivePageUrl);
     const existing = state.resources.get(id);
     if (existing) {
-      mergeResource(existing, payload, ctx);
-      changed = true;
+      if (mergeResource(existing, payload, ctx)) changed = true;
       continue;
     }
 
@@ -283,6 +409,7 @@ export function ingestResources(
       label: payload.label,
     };
     if (!isWorthShowing(resource)) continue;
+    if (isSegmentLike(resource)) evictOldestSegments(state.resources, MAX_SEGMENTS_PER_TAB - 1);
     if (state.resources.size >= MAX_RESOURCES_PER_TAB) evictLowest(state.resources);
     state.resources.set(id, resource);
     added++;
@@ -318,19 +445,43 @@ export function addManifest(
   const key = manifestUrl ? getEngine().dedupeKey(manifestUrl, pageUrl || state.pageUrl) : "__legacy__";
   state.manifests.delete(key);
   state.manifests.set(key, manifest);
+  state.carriedManifests.delete(key);
   while (state.manifests.size > MAX_MANIFESTS_PER_TAB) {
     const oldest = state.manifests.keys().next().value;
     if (typeof oldest !== "string") break;
     state.manifests.delete(oldest);
+    state.carriedManifests.delete(oldest);
   }
   touch(tabId);
   return true;
 }
 
-export function getManifests(tabId: number): { url: string; manifest: DashManifest }[] {
+export function getManifests(tabId: number): DashManifestEntry[] {
   const state = tabs.get(tabId);
   if (!state) return [];
-  return [...state.manifests.entries()].map(([url, manifest]) => ({ url, manifest }));
+  return [...state.manifests.entries()].map(([url, manifest]) =>
+    state.carriedManifests.has(url) ? { url, manifest, carried: true } : { url, manifest },
+  );
+}
+
+/** 保存一份 HLS 播放列表的关联信息（同 URL 取最新，按 tab 有界）。 */
+export function addHlsPlaylist(tabId: number, url: string, playlist: HlsPlaylistInfo, pageUrl: string): void {
+  const state = stateOf(tabId);
+  const key = getEngine().dedupeKey(url, pageUrl || state.pageUrl);
+  state.hlsPlaylists.delete(key);
+  state.hlsPlaylists.set(key, playlist);
+  while (state.hlsPlaylists.size > MAX_HLS_PLAYLISTS_PER_TAB) {
+    const oldest = state.hlsPlaylists.keys().next().value;
+    if (typeof oldest !== "string") break;
+    state.hlsPlaylists.delete(oldest);
+  }
+  touch(tabId);
+}
+
+export function getHlsPlaylists(tabId: number): HlsPlaylistEntry[] {
+  const state = tabs.get(tabId);
+  if (!state) return [];
+  return [...state.hlsPlaylists.entries()].map(([url, playlist]) => ({ url, playlist }));
 }
 
 // ===== 媒体元素 =====
@@ -400,6 +551,11 @@ const persistedOrder: number[] = [];
 /** SW 启动时的恢复任务；持久化要等它结束，避免空状态抢先覆盖旧快照。 */
 let restoreReady: Promise<void> = Promise.resolve();
 
+/** 等会话快照恢复完成（读视图前调用；恢复失败也会 resolve）。 */
+export function whenRestored(): Promise<void> {
+  return restoreReady;
+}
+
 function schedulePersist(tabId: number): void {
   if (!browser.storage.session || persistTimers.has(tabId)) return;
   persistTimers.set(
@@ -420,6 +576,7 @@ function snapshotOf(tabId: number): PersistedTab | null {
       .slice(0, MAX_PERSISTED_RESOURCES)
       .map(({ cookies: _cookies, ...rest }) => rest),
     manifests: getManifests(tabId),
+    hlsPlaylists: getHlsPlaylists(tabId),
     elements: [...state.elements.values()],
   };
 }
@@ -479,6 +636,10 @@ export async function restoreTabState(): Promise<void> {
         void session.remove(key).catch(() => {});
         continue;
       }
+      if (state.navUrl === "" && state.pageUrl) {
+        state.navUrl = state.pageUrl;
+        state.pageKeys = new Set([pageUrlKey(state.pageUrl)]);
+      }
       if (!persistedOrder.includes(tabId)) persistedOrder.push(tabId);
       for (const listener of changeListeners) listener(tabId);
     }
@@ -494,8 +655,9 @@ export function installTabState(): void {
   browser.tabs.onRemoved.addListener((tabId) => removeTab(tabId));
   browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (!changeInfo.url) return;
-    // 带 status:loading 的是真实导航：连已登记帧一并重置；否则是 pushState / hash 变化。
-    syncTabPageUrl(tabId, changeInfo.url, changeInfo.status !== "loading");
+    // 整页导航与同文档 pushState / replaceState 在这里都报 status:"loading"，无法区分：
+    // 只按路径换页，query 级换页交给 content 的 push / pop / document 上报。
+    syncTabPageUrl(tabId, changeInfo.url, "tab");
   });
   restoreReady = restoreTabState();
 }

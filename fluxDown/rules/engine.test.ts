@@ -86,3 +86,39 @@ describe("listRules 状态", () => {
     expect(list.map((e) => e.status)).toEqual(["engine-too-new"]);
   });
 });
+
+describe("page / request / mirror / manifest 规则", () => {
+  const local = (rules: unknown[]): RulePack =>
+    ({ format: "fluxdown-sniff-pack", packId: "local", sequence: 1, engine: 1, issuedAt: "2026-01-01T00:00:00Z", rules }) as RulePack;
+  const engine = build({
+    packs: [local([
+      { id: "local.title", version: 1, tier: "local", stage: "page", match: { pageHost: ["v.example.com"] }, action: { kind: "title", selector: ".t", attr: "data-name" } },
+      { id: "local.ad", version: 1, tier: "local", stage: "page", match: { pageHost: ["v.example.com"] }, action: { kind: "player", selector: ".ad", float: "hide" } },
+      { id: "local.ref", version: 1, tier: "local", stage: "request", match: { host: ["cdn.example.com"] }, action: { kind: "headers", set: { Referer: "https://v.example.com/" } } },
+      { id: "local.mirror", version: 1, tier: "local", stage: "normalize", match: {}, action: { kind: "mirror", hosts: ["cdn.example.com", "bak.example.net"] } },
+      { id: "local.api", version: 1, tier: "local", stage: "body", match: { url: ["*/api/play*"] }, action: { kind: "manifest", path: "data.streams" } },
+    ])],
+  });
+
+  test("pageHints 只在匹配的页面生效", () => {
+    expect(engine.pageHints("https://v.example.com/watch/1")).toEqual({
+      titles: [{ selector: ".t", attr: "data-name" }],
+      players: [{ selector: ".ad" }],
+    });
+    expect(engine.pageHints("https://other.example.org/")).toEqual({ titles: [], players: [] });
+  });
+
+  test("requestHeaders 按 URL host 匹配，名字小写", () => {
+    expect(engine.requestHeaders("https://cdn.example.com/a.mp4", "https://v.example.com/")).toEqual({ referer: "https://v.example.com/" });
+    expect(engine.requestHeaders("https://elsewhere.com/a.mp4", "https://v.example.com/")).toEqual({});
+  });
+
+  test("mirrorGroups 与 manifestsFromBody", () => {
+    expect(engine.mirrorGroups()).toEqual([["cdn.example.com", "bak.example.net"]]);
+    const body = { data: { streams: { video: [{ baseUrl: "https://cdn.example.com/1.mp4" }] } } };
+    expect(engine.manifestsFromBody("https://v.example.com/api/play?id=1", "https://v.example.com/", body)).toEqual([
+      body.data.streams,
+    ]);
+    expect(engine.bodyWatchers("https://v.example.com/").some((w) => w.rule.id === "local.api")).toBe(true);
+  });
+});

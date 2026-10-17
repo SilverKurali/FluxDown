@@ -76,6 +76,8 @@ export function RuleEditorModal(props: RuleEditorModalProps): JSX.Element {
     track: t("rules.stage.track"),
     body: t("rules.stage.body"),
     dom: t("rules.stage.dom"),
+    page: t("rules.stage.page"),
+    request: t("rules.stage.request"),
   };
 
   /** 当前表单 / JSON 对应的草稿对象；解析失败返回错误文案。 */
@@ -141,7 +143,7 @@ export function RuleEditorModal(props: RuleEditorModalProps): JSX.Element {
   };
 
   const changeStage = (stage: EditorStage) => {
-    if (stage === "body" || stage === "dom" || stage === "track") {
+    if (stage === "body" || stage === "dom" || stage === "track" || stage === "page" || stage === "request") {
       // 这些 stage 只能写 JSON：以模板为起点切换模式。
       setJsonText(JSON.stringify({ ...ruleTemplate(stage, base().id), title: form.title.trim() || undefined }, null, 2));
       setMode("json");
@@ -214,6 +216,8 @@ export function RuleEditorModal(props: RuleEditorModalProps): JSX.Element {
                   { value: "normalize", label: stageLabels.normalize },
                   { value: "body", label: stageLabels.body },
                   { value: "dom", label: stageLabels.dom },
+                  { value: "page", label: stageLabels.page },
+                  { value: "request", label: stageLabels.request },
                 ]}
               />
             </Field>

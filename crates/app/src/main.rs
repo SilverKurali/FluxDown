@@ -12,6 +12,7 @@ mod app;
 mod app_icon;
 mod assets;
 mod capability_ports;
+mod chrome_layout;
 mod command_palette;
 mod completion_windows;
 mod downloads_port;

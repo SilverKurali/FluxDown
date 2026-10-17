@@ -11,12 +11,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use crate::bt_downloader::{self, BtConfig, BtDownloadParams, SharedBtSession, TorrentSource};
+use crate::bt_config::BtConfig;
+#[cfg(feature = "bt")]
+use crate::bt_downloader::{self, BtDownloadParams, SharedBtSession, TorrentSource};
+#[cfg(feature = "bt")]
 use crate::bt_seeding::{
-    SEED_TIME_FALLBACK_PERSIST_INTERVAL, SEEDING_QUEUED_MESSAGE, SEEDING_STATUS_ACTIVE,
-    SEEDING_STATUS_QUEUED, SeedLimitOverrides, SeedingLimitConfig, SeedingRegistration,
-    SeedingStopReason, SeedingUploadSnapshot, seed_times_persist_due,
+    SEED_TIME_FALLBACK_PERSIST_INTERVAL, SEEDING_QUEUED_MESSAGE, SeedLimitOverrides,
+    SeedingLimitConfig, SeedingRegistration, SeedingUploadSnapshot, seed_times_persist_due,
 };
+use crate::bt_seeding::{SEEDING_STATUS_ACTIVE, SEEDING_STATUS_QUEUED, SeedingStopReason};
 use crate::dash_downloader;
 use crate::db::{CreateBatchRecord, Db, DbError, NewTaskRow};
 use crate::downloader::{self, DownloadParams, ProgressUpdate, SegmentProgressInfo};
@@ -133,6 +136,7 @@ async fn publish_task_failure(
     }
 }
 
+#[cfg(feature = "bt")]
 async fn handle_bt_worker_error(
     task_id: &str,
     error: &downloader::DownloadError,
@@ -170,6 +174,7 @@ async fn handle_bt_worker_error(
     }
 }
 
+#[cfg(feature = "bt")]
 async fn rollback_seeding_registration(
     bt: &SharedBtSession,
     db: &Db,
@@ -256,20 +261,24 @@ const MAX_AUTO_RETRY_DELAY_SECS: u64 = 300;
 /// 「晚点再继续」，故给 15 分钟宽限：期间恢复仍保持秒级；超时后释放会话，
 /// 恢复走既有重建路径（`ensure_bt_session` + add_torrent + fastresume）。
 /// 宽限从会话「除暂停任务外再无保活来源」那一刻起算，任何 BT 活动都会重置。
+#[cfg(feature = "bt")]
 const BT_SESSION_PAUSED_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// `invalidate_bt_session` 在关停前等待 inflight `add_torrent` 任务归零的
 /// 总上限。BT 监听端口由这些 detached 任务持有的 `Arc<Session>` 绑定，
 /// 超时后即便仍有 inflight 也强行继续关停（避免无限等待挂死配置变更）。
 /// 5s 取自 magnet DHT 元数据解析的典型耗时上界。
+#[cfg(feature = "bt")]
 const INVALIDATE_INFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// `invalidate_bt_session` 轮询 inflight `add_torrent` 状态的间隔。
 /// 200ms 足够细以快速响应归零，又不会空耗 CPU。
+#[cfg(feature = "bt")]
 const INVALIDATE_INFLIGHT_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(200);
 
 /// [`decide_bt_session_release`] 的输入：当前各 BT 会话保活来源是否存在。
+#[cfg(feature = "bt")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct BtSessionHolds {
     /// 有 BT 任务正在下载。
@@ -285,6 +294,7 @@ struct BtSessionHolds {
 }
 
 /// 硬保活来源：只要存在就不能释放会话，也不计入暂停宽限。
+#[cfg(feature = "bt")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BtSessionKeep {
     ActiveDownload,
@@ -293,6 +303,7 @@ enum BtSessionKeep {
     InflightAdd,
 }
 
+#[cfg(feature = "bt")]
 impl BtSessionHolds {
     /// 第一个命中的硬保活来源（不含暂停任务）。
     fn busy_reason(self) -> Option<BtSessionKeep> {
@@ -311,6 +322,7 @@ impl BtSessionHolds {
 }
 
 /// [`decide_bt_session_release`] 的判定结果。
+#[cfg(feature = "bt")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BtSessionVerdict {
     /// 有硬保活来源，会话必须保留。
@@ -332,6 +344,7 @@ enum BtSessionVerdict {
 ///   期间的任何 BT 活动都会让下一次空闲重新起算完整宽限；
 /// - 只剩暂停任务 → 首次观察时起算，`now - 起点 >= grace` 才释放；
 /// - 什么都不剩 → 立即释放（沿用原语义）。
+#[cfg(feature = "bt")]
 fn decide_bt_session_release(
     holds: BtSessionHolds,
     paused_idle_since: &mut Option<std::time::Instant>,
@@ -528,7 +541,7 @@ fn is_ftp_url(url: &str) -> bool {
 
 /// Determine if a URL is a magnet link.
 fn is_magnet(url: &str) -> bool {
-    bt_downloader::is_magnet_url(url)
+    crate::bt_config::is_magnet_url(url)
 }
 
 /// Determine if a URL is a torrent-file sentinel (task created from .torrent file).
@@ -541,8 +554,44 @@ fn is_bt_url(url: &str) -> bool {
     is_magnet(url) || is_torrent_file_url(url)
 }
 
+/// Determine if a URL is an `ed2k://` link (case-insensitive prefix; no parsing).
+///
+/// 无 `ed2k` feature 时 `ed2k` 模块不存在，这里仍要能识别该协议，才能明确
+/// 拒绝而不是把它当 HTTP 链接去请求。
+fn is_ed2k_url(url: &str) -> bool {
+    url.trim_start()
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("ed2k://"))
+}
+
+/// 本构建是否会因 eD2K 被编译期剔除而拒绝该新建任务（含解出 ed2k 地址的
+/// thunder 链接）。有 `ed2k` feature 时恒为 `false`。
+///
+/// 供 daemon 在建任务前预检，以便把 [`UNSUPPORTED_PROTOCOL_MESSAGE`] 回报给
+/// 客户端，而不是等 `create_task` 返回无原因的 `None`。BT 的对应预检是
+/// [`DownloadManager::rejects_new_bt_task`]。
+#[must_use]
+pub fn rejects_unsupported_protocol(url: &str) -> bool {
+    if cfg!(feature = "ed2k") {
+        return false;
+    }
+    is_ed2k_url(url)
+        || (crate::thunder::is_thunder_url(url)
+            && crate::thunder::decode_thunder_url(url).is_ok_and(|real| is_ed2k_url(&real)))
+}
+
 /// BT 被用户在设置中禁用时，所有拒绝路径（建任务 / 恢复 / 会话初始化）共用的原因文案。
+#[cfg(feature = "bt")]
 pub const BT_DISABLED_MESSAGE: &str = "BitTorrent is disabled in settings";
+
+/// 编译期没有 BT 后端（无 `bt` feature）时 magnet / 种子任务的拒绝原因：
+/// 与其它不支持的协议共用通用文案，不暴露具体协议品牌。
+#[cfg(not(feature = "bt"))]
+pub const BT_DISABLED_MESSAGE: &str = UNSUPPORTED_PROTOCOL_MESSAGE;
+
+/// 本构建不支持的链接协议（BT / eD2K 被编译期剔除）的通用拒绝文案。
+pub const UNSUPPORTED_PROTOCOL_MESSAGE: &str =
+    "unsupported link: protocol not available in this build";
 
 /// URL 去重比较前的归一化：只剥离 fragment（`#` 之后的部分）与首尾空白。
 /// 下载链接的 fragment 极少携带语义（网页锚点惯例），刻意不处理 query——
@@ -569,7 +618,14 @@ fn task_url_protocol(url: &str) -> Option<&'static str> {
 /// 返回空串。ed2k 在建任务时已从链接解析出文件名，不会走到这里。
 fn webhook_provisional_file_name(url: &str) -> String {
     let name = if is_magnet(url) {
-        bt_downloader::magnet_display_name(url)
+        #[cfg(feature = "bt")]
+        {
+            bt_downloader::magnet_display_name(url)
+        }
+        #[cfg(not(feature = "bt"))]
+        {
+            None
+        }
     } else if task_url_protocol(url).is_some() {
         naming::extract_from_url(url)
     } else {
@@ -601,6 +657,7 @@ fn task_target_path(save_dir: &str, file_name: &str) -> Option<PathBuf> {
 
 /// BT 启动清理：目录中是否仍有任一非空文件。无法确定内容时保守视为有数据，
 /// 防止临时权限/设备错误被误当成空目录而删除可恢复的下载数据。
+#[cfg(feature = "bt")]
 async fn directory_has_real_data(path: &Path) -> bool {
     let mut entries = match tokio::fs::read_dir(path).await {
         Ok(entries) => entries,
@@ -905,17 +962,20 @@ async fn deferred_file_cleanup(
                 }
             }
         }
-        let stage_dir = bt_downloader::bt_stage_dir(&save_dir, &task_id);
-        if stage_dir.exists() {
-            log_info!(
-                "[manager] delete {} deferred: removing staging dir {}",
-                task_id,
-                stage_dir.display()
-            );
-            if let Err(error) = tokio::fs::remove_dir_all(&stage_dir).await
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                crate::logger::report_warning("download-manager", "remove task files", &error);
+        #[cfg(feature = "bt")]
+        {
+            let stage_dir = bt_downloader::bt_stage_dir(&save_dir, &task_id);
+            if stage_dir.exists() {
+                log_info!(
+                    "[manager] delete {} deferred: removing staging dir {}",
+                    task_id,
+                    stage_dir.display()
+                );
+                if let Err(error) = tokio::fs::remove_dir_all(&stage_dir).await
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    crate::logger::report_warning("download-manager", "remove task files", &error);
+                }
             }
         }
     } else {
@@ -1058,7 +1118,9 @@ struct DeleteCleanup {
     handle: Option<JoinHandle<()>>,
     /// `None` = 库里已无此任务，只等在途下载退出。
     files: Option<DeleteFiles>,
+    #[cfg(feature = "bt")]
     bt_session: Option<Arc<SharedBtSession>>,
+    #[cfg(feature = "bt")]
     app_data_dir: Arc<str>,
     file_permits: Arc<Semaphore>,
 }
@@ -1070,7 +1132,9 @@ async fn run_delete_cleanup(job: DeleteCleanup) -> Result<(), downloader::Downlo
         task_id,
         handle,
         files,
+        #[cfg(feature = "bt")]
         bt_session,
+        #[cfg(feature = "bt")]
         app_data_dir,
         file_permits,
     } = job;
@@ -1092,6 +1156,7 @@ async fn run_delete_cleanup(job: DeleteCleanup) -> Result<(), downloader::Downlo
         }
         return Ok(());
     };
+    #[cfg(feature = "bt")]
     if files.is_bt {
         remove_from_bt_session(
             &task_id,
@@ -1135,6 +1200,7 @@ async fn run_delete_cleanup(job: DeleteCleanup) -> Result<(), downloader::Downlo
     result
 }
 
+#[cfg(feature = "bt")]
 /// 把 BT 任务移出 librqbit 会话（会话持久化与可选的文件一并清理）。句柄尚未落位
 /// （磁力解析中 / 重新做种校验中）时登记待删，由落位方清理；无会话时直接删 parts 边车。
 async fn remove_from_bt_session(
@@ -1179,7 +1245,7 @@ fn keep_first_cleanup_error(first: &mut Option<std::io::Error>, result: std::io:
 /// 删除一个被删任务的磁盘文件：BT 的最终产物与 staging 目录；其余协议的临时文件、
 /// 独立音轨与最终产物；以及登记的衍生产物。
 async fn remove_deleted_task_files(
-    task_id: &str,
+    #[cfg_attr(not(feature = "bt"), allow(unused_variables))] task_id: &str,
     files: &DeleteFiles,
 ) -> Result<(), downloader::DownloadError> {
     let mut first_error = None;
@@ -1196,18 +1262,21 @@ async fn remove_deleted_task_files(
             };
             keep_first_cleanup_error(&mut first_error, result);
         }
-        // 任务级 staging 目录无论是否删除文件都清理：未完成时里面是残缺数据。
-        let stage_dir = bt_downloader::bt_stage_dir(&files.save_dir, task_id);
-        if stage_dir.exists() {
-            log_info!(
-                "[manager] delete_tasks_batch {}: removing staging dir {}",
-                task_id,
-                stage_dir.display()
-            );
-            keep_first_cleanup_error(
-                &mut first_error,
-                tokio::fs::remove_dir_all(&stage_dir).await,
-            );
+        #[cfg(feature = "bt")]
+        {
+            // 任务级 staging 目录无论是否删除文件都清理：未完成时里面是残缺数据。
+            let stage_dir = bt_downloader::bt_stage_dir(&files.save_dir, task_id);
+            if stage_dir.exists() {
+                log_info!(
+                    "[manager] delete_tasks_batch {}: removing staging dir {}",
+                    task_id,
+                    stage_dir.display()
+                );
+                keep_first_cleanup_error(
+                    &mut first_error,
+                    tokio::fs::remove_dir_all(&stage_dir).await,
+                );
+            }
         }
     } else {
         let temp_path = PathBuf::from(format!("{}{}", path.display(), downloader::TEMP_EXT));
@@ -1431,7 +1500,7 @@ fn ask_support(
     use crate::file_exists::AskSupport;
     if hls_downloader::is_hls_url(url) || is_bt_url(url) || has_audio_track {
         AskSupport::None
-    } else if dash_downloader::is_dash_url(url) || crate::ed2k::link::is_ed2k_url(url) {
+    } else if dash_downloader::is_dash_url(url) || is_ed2k_url(url) {
         AskSupport::NoSkip
     } else if non_get_request {
         // 答复后以恢复路径重入，恢复一律按 GET 重发，非 GET 请求不能询问。
@@ -2100,9 +2169,25 @@ async fn run_http_family_task(run: HttpFamilyRun) {
                     .catch_unwind()
                     .await
             } else if use_ed2k {
-                std::panic::AssertUnwindSafe(crate::ed2k::run_ed2k_download(params))
-                    .catch_unwind()
-                    .await
+                #[cfg(feature = "ed2k")]
+                {
+                    std::panic::AssertUnwindSafe(crate::ed2k::run_ed2k_download(params))
+                        .catch_unwind()
+                        .await
+                }
+                // 无 eD2K 后端：明确失败，绝不把 ed2k:// 当 HTTP 链接去请求。
+                #[cfg(not(feature = "ed2k"))]
+                {
+                    drop(params);
+                    persist_task_failure(
+                        &task_id,
+                        UNSUPPORTED_PROTOCOL_MESSAGE.to_string(),
+                        &panic_db,
+                        &panic_progress_tx,
+                    )
+                    .await;
+                    Ok(())
+                }
             } else {
                 std::panic::AssertUnwindSafe(downloader::run_download(params))
                     .catch_unwind()
@@ -2191,6 +2276,7 @@ fn parse_hhmm(s: &str) -> Option<u32> {
 /// `queue_kbps` > 0 时折算 ×1024；`queue_kbps` 为 `None` 表示任务不属于
 /// 任何已知队列。全局 `upload_limit_bytes` 是 librqbit 会话级的第二层
 /// 限速，恒作为上限叠加，不在此参与计算。
+#[cfg(feature = "bt")]
 fn effective_upload_bps(task_bps: i64, queue_kbps: Option<i64>) -> u64 {
     if task_bps > 0 {
         return task_bps as u64;
@@ -2359,6 +2445,9 @@ pub struct NewTaskSpec {
 pub enum CreateRejection {
     /// BT 被用户禁用（magnet / 种子字节 / 解出 BT 地址的 thunder 链接）。
     BtDisabled,
+    /// 链接协议在本构建中不可用（eD2K 被编译期剔除）。BT 被编译期剔除时沿用
+    /// [`Self::BtDisabled`]（其文案即通用「不支持的链接」）。
+    UnsupportedProtocol,
     /// thunder:// 链接解码失败。
     InvalidThunderLink(String),
     /// checksum spec 畸形（未知算法 / 哈希非十六进制 / 长度不符）。
@@ -2371,6 +2460,7 @@ impl std::fmt::Display for CreateRejection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BtDisabled => formatter.write_str(BT_DISABLED_MESSAGE),
+            Self::UnsupportedProtocol => formatter.write_str(UNSUPPORTED_PROTOCOL_MESSAGE),
             Self::InvalidThunderLink(reason) => write!(formatter, "invalid thunder link: {reason}"),
             Self::InvalidChecksum(reason) => write!(formatter, "invalid checksum: {reason}"),
             Self::InvalidHeaders(reason) => write!(formatter, "invalid request headers: {reason}"),
@@ -2661,6 +2751,7 @@ struct QueuedTask {
     extra_headers: std::collections::HashMap<String, String>,
     /// Pre-selected file indices for BT downloads (from the new-download dialog).
     /// Non-empty = skip the BtFilesInfo dialog.
+    #[cfg_attr(not(feature = "bt"), allow(dead_code))]
     selected_file_indices: Vec<i32>,
     /// 浏览器扩展捕获的原始 HTTP method（如 "POST"）。`None` 视为 "GET"。
     /// 配合 `body` 字段一起重建 form-POST 等触发的下载请求事务。
@@ -3028,10 +3119,12 @@ pub struct DownloadManager {
     /// All BT tasks share a single `librqbit::Session` (DHT, trackers,
     /// listening port, speed limits) to avoid per-task resource waste.
     /// Wrapped in `Arc` so spawned download tasks can cache handles.
+    #[cfg(feature = "bt")]
     bt_session: Option<Arc<SharedBtSession>>,
     /// Default save directory used to initialise the BT session.
     default_save_dir: String,
     /// Application data directory (exe dir) for BT persistence files.
+    #[cfg_attr(not(feature = "bt"), allow(dead_code))]
     app_data_dir: String,
     /// 解析后的引擎数据目录（组件 bin/ 探测用；由 `Engine::new` 注入）。
     data_dir: std::path::PathBuf,
@@ -3112,10 +3205,12 @@ pub struct DownloadManager {
     auto_retry_counts: HashMap<String, u32>,
     /// 上次落库做种时长的时刻（单调时钟）。`account_seeding_tick` 据此判定兜底
     /// 落库是否到点，见 [`seed_times_persist_due`]。
+    #[cfg(feature = "bt")]
     last_seed_time_persist: Mutex<std::time::Instant>,
     /// BT 会话进入「仅因暂停中的未完成任务而保活」空闲期的起点（内存级）。
     /// `None` = 不在该空闲期。超过 [`BT_SESSION_PAUSED_IDLE_GRACE`] 后释放会话，
     /// 见 [`decide_bt_session_release`]。
+    #[cfg(feature = "bt")]
     bt_paused_idle_since: Option<std::time::Instant>,
     /// System 代理模式下按系统代理指纹缓存的全局 client（见 `global_client`）。
     system_client: std::sync::Mutex<Option<(String, Client)>>,
@@ -3276,11 +3371,12 @@ impl DownloadManager {
             queue_positions_dirty: false,
             speed_limiter: limiter,
             upload_limit_bps,
+            #[cfg(feature = "bt")]
             bt_session: None,
             default_save_dir,
             app_data_dir,
             data_dir,
-            bt_config,
+            bt_config: bt_config.effective(),
             global_user_agent: user_agent,
             global_default_segments: 0,
             auto_max_connections: DEFAULT_AUTO_MAX_CONNECTIONS,
@@ -3316,7 +3412,9 @@ impl DownloadManager {
             occupied_queues: HashSet::new(),
             retry_scheduled: HashMap::new(),
             retry_pending_reported: 0,
+            #[cfg(feature = "bt")]
             last_seed_time_persist: Mutex::new(std::time::Instant::now()),
+            #[cfg(feature = "bt")]
             bt_paused_idle_since: None,
             system_client: std::sync::Mutex::new(None),
             task_clients: std::sync::Mutex::new(HashMap::new()),
@@ -4487,6 +4585,7 @@ impl DownloadManager {
             }
         }
         // Synchronise the download limit to the shared BT session (if initialised).
+        #[cfg(feature = "bt")]
         if let Some(ref bt) = self.bt_session {
             bt.set_speed_limit(bps);
         }
@@ -4497,6 +4596,7 @@ impl DownloadManager {
     /// [`Self::ensure_bt_session`] 惰性创建会话时使用。0 = 不限。
     pub fn set_upload_speed_limit(&mut self, bps: u64) {
         self.upload_limit_bps = bps;
+        #[cfg(feature = "bt")]
         if let Some(ref bt) = self.bt_session {
             bt.set_upload_speed_limit(bps);
         }
@@ -4770,30 +4870,40 @@ impl DownloadManager {
                 BT_DISABLED_MESSAGE.to_string(),
             ));
         }
-        // 任何经此入口的 BT 活动（新下载 / 恢复 / 重新挂载做种）都结束「仅暂停
-        // 任务保活」的空闲期，下一次空闲重新起算完整宽限。
-        self.bt_paused_idle_since = None;
-        if self.bt_session.is_none() {
-            let speed_limit = self.speed_limiter.limit();
-            let upload_limit = self.upload_limit_bps;
-            let save_dir = self.default_save_dir.clone();
-            let data_dir = self.app_data_dir.clone();
-            let config = self.bt_config.clone();
-            let session = tokio::task::spawn_blocking(move || {
-                SharedBtSession::new(&save_dir, &data_dir, speed_limit, upload_limit, &config)
-            })
-            .await
-            .map_err(|e| {
-                downloader::DownloadError::Other(format!("BT session init thread panicked: {e}"))
-            })??;
-            let session = Arc::new(session);
-            // 新会话的 SeedingManager 以当前配置的活动做种上限起步。
-            session
-                .seeding_manager()
-                .set_cap(self.bt_config.seed_max_active);
-            self.bt_session = Some(session);
+        #[cfg(feature = "bt")]
+        {
+            // 任何经此入口的 BT 活动（新下载 / 恢复 / 重新挂载做种）都结束「仅暂停
+            // 任务保活」的空闲期，下一次空闲重新起算完整宽限。
+            self.bt_paused_idle_since = None;
+            if self.bt_session.is_none() {
+                let speed_limit = self.speed_limiter.limit();
+                let upload_limit = self.upload_limit_bps;
+                let save_dir = self.default_save_dir.clone();
+                let data_dir = self.app_data_dir.clone();
+                let config = self.bt_config.clone();
+                let session = tokio::task::spawn_blocking(move || {
+                    SharedBtSession::new(&save_dir, &data_dir, speed_limit, upload_limit, &config)
+                })
+                .await
+                .map_err(|e| {
+                    downloader::DownloadError::Other(format!(
+                        "BT session init thread panicked: {e}"
+                    ))
+                })??;
+                let session = Arc::new(session);
+                // 新会话的 SeedingManager 以当前配置的活动做种上限起步。
+                session
+                    .seeding_manager()
+                    .set_cap(self.bt_config.seed_max_active);
+                self.bt_session = Some(session);
+            }
+            Ok(())
         }
-        Ok(())
+        // 无 BT 后端：`bt_config.enabled` 恒为 false（见 `BtConfig::effective`），上面已返回。
+        #[cfg(not(feature = "bt"))]
+        {
+            Ok(())
+        }
     }
 
     /// Update BT configuration. Runtime-read settings (seeding limits, the
@@ -4803,10 +4913,11 @@ impl DownloadManager {
     pub fn set_bt_config(&mut self, config: BtConfig) {
         // 活动做种数上限热生效：直接写入 SeedingManager，队列在下一次
         // 做种求值 tick 的 reconcile 中被重新平衡。
+        #[cfg(feature = "bt")]
         if let Some(ref bt) = self.bt_session {
             bt.seeding_manager().set_cap(config.seed_max_active);
         }
-        self.bt_config = config;
+        self.bt_config = config.effective();
     }
 
     /// Periodically drive the seeding lifecycle:
@@ -4820,6 +4931,7 @@ impl DownloadManager {
     ///    it for [`BT_SESSION_PAUSED_IDLE_GRACE`].
     ///
     /// This is a cheap no-op (zero I/O) when no BT session exists or nothing seeds.
+    #[cfg(feature = "bt")]
     pub async fn tick_seeding_evaluation(&mut self) {
         self.reconcile_seeding_slots().await;
         let rows = self.account_seeding_tick().await;
@@ -4905,9 +5017,14 @@ impl DownloadManager {
         self.recheck_bt_session_paused_grace().await;
     }
 
+    /// 无 BT 后端：没有做种者，周期求值为空操作。
+    #[cfg(not(feature = "bt"))]
+    pub async fn tick_seeding_evaluation(&mut self) {}
+
     /// Rebalance active seeders against `seed_max_active`: promote queued
     /// seeds while slots are free (unpause + persist + notify) and park
     /// over-cap seeders back into the queue (pause + persist + notify).
+    #[cfg(feature = "bt")]
     async fn reconcile_seeding_slots(&self) {
         let Some(ref bt) = self.bt_session else {
             return;
@@ -5001,6 +5118,7 @@ impl DownloadManager {
     /// 落库满 [`SEED_TIME_FALLBACK_PERSIST_INTERVAL`]。纯判定见
     /// [`seed_times_persist_due`]；落库时刻由写库成功后的
     /// [`Self::mark_seed_times_persisted`] 登记，写库失败时下个 tick 会重试。
+    #[cfg(feature = "bt")]
     fn seed_times_due(&self, has_upload_delta: bool) -> bool {
         let last = *self
             .last_seed_time_persist
@@ -5015,6 +5133,7 @@ impl DownloadManager {
     }
 
     /// 登记做种时长刚刚落库（重置兜底计时）。
+    #[cfg(feature = "bt")]
     fn mark_seed_times_persisted(&self) {
         *self
             .last_seed_time_persist
@@ -5025,6 +5144,7 @@ impl DownloadManager {
     /// 正常关机结算：把所有活动做种者的内存累计做种时长落库。做种时长平时不按
     /// 固定周期落库（见 [`SEED_TIME_FALLBACK_PERSIST_INTERVAL`]），关机是除状态迁移
     /// 外最后的落库机会；崩溃/断电最多丢失一个兜底间隔的累计。
+    #[cfg(feature = "bt")]
     async fn flush_seed_times(&self) {
         let Some(bt) = &self.bt_session else {
             return;
@@ -5048,6 +5168,7 @@ impl DownloadManager {
     /// 会话重建）后仍然正确；零增量不写库，但事件照发，上传速率归零能同步到 UI。
     /// 零上传且未到兜底点时整个 tick 不产生 DB 写（NAS 上休眠的 HDD 不被唤醒）。
     /// 返回的任务行已折入本轮写入的累计上传与内存实时做种时长，供限额求值直接使用。
+    #[cfg(feature = "bt")]
     async fn account_seeding_tick(&self) -> HashMap<String, TaskInfo> {
         let Some(ref bt) = self.bt_session else {
             return HashMap::new();
@@ -5160,6 +5281,7 @@ impl DownloadManager {
     /// `total_bytes` from the DB row so ratio limits are not under-counted
     /// across librqbit session resets. Per-task overrides（跟随全局/不限/
     /// 自定义）在此处解析为生效配置；组合方式与达标动作恒为全局值。
+    #[cfg(feature = "bt")]
     async fn evaluate_seeding_limits(
         &self,
         rows: &HashMap<String, TaskInfo>,
@@ -5266,6 +5388,7 @@ impl DownloadManager {
     /// with the latest `bt_config` on the next BT download.  Active BT
     /// downloads are gracefully paused first so their progress is preserved
     /// and they appear as "paused" (status 2) in the UI.
+    #[cfg(feature = "bt")]
     pub async fn invalidate_bt_session(&mut self) {
         // BT 刚被禁用时，排队中的 BT 项立即落回暂停（不必等下一次 drain）。
         self.park_pending_bt_tasks().await;
@@ -5421,6 +5544,12 @@ impl DownloadManager {
         }
     }
 
+    /// 无 BT 后端：没有会话可释放；仅把排队中的 BT 项落回暂停（沿用禁用路径）。
+    #[cfg(not(feature = "bt"))]
+    pub async fn invalidate_bt_session(&mut self) {
+        self.park_pending_bt_tasks().await;
+    }
+
     /// 立即发布完整队列位置；用户批量操作不等待合并节拍。
     fn broadcast_queue_positions(&mut self) {
         self.queue_positions_dirty = false;
@@ -5524,7 +5653,8 @@ impl DownloadManager {
             let audio = dash_downloader::build_audio_path(&target);
             temps.push(PathBuf::from(format!("{}{}", audio.display(), temp_ext)));
         }
-        if crate::ed2k::link::is_ed2k_url(&task.url)
+        #[cfg(feature = "ed2k")]
+        if is_ed2k_url(&task.url)
             && let Ok(link) = crate::ed2k::link::parse_ed2k_link(&task.url)
         {
             temps.push(Path::new(&task.save_dir).join(format!("{}{}", link.file_name, temp_ext)));
@@ -5640,6 +5770,7 @@ impl DownloadManager {
     /// 都未设置返回 0（不设 torrent 级限制）。全局 `upload_limit_bytes`
     /// 是 librqbit 会话级的第二层限速，恒作为上限叠加，不在此参与计算。
     /// 生效时机与任务级一致：仅在 add/re-add 时烘焙，live 句柄不热改。
+    #[cfg(feature = "bt")]
     fn effective_task_upload_bps(&self, task: &TaskInfo) -> u64 {
         effective_upload_bps(
             task.seed_upload_limit_bps,
@@ -5675,7 +5806,14 @@ impl DownloadManager {
     /// BT 被禁用时，把 `pending_queue` 里的 BT 项整体摘出并落回暂停。
     /// BT 启用或队列无 BT 项时为空操作；返回被摘出的任务数。
     async fn park_pending_bt_tasks(&mut self) -> usize {
-        if self.bt_config.enabled || self.pending_queue.is_empty() {
+        // 先只读判定：队列里没有 BT 项时绝不重建 `VecDeque`（drain 热路径，且无 BT
+        // 后端的构建里 `enabled` 恒为 false，每次 drain 都会走到这里）。
+        if self.bt_config.enabled
+            || !self
+                .pending_queue
+                .iter()
+                .any(|queued| is_bt_url(&queued.url) || !queued.torrent_file_bytes.is_empty())
+        {
             return 0;
         }
         let (bt_items, rest): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut self.pending_queue)
@@ -5917,6 +6055,7 @@ impl DownloadManager {
             // ——删除占位行（不进自动重试 / 插件 onError / task.failed
             // webhook），发 DuplicateTorrentDetected 事件由宿主提示用户并
             // 指向已有任务。
+            #[cfg(feature = "bt")]
             if task.status == 4
                 && let Some(owner_id) = task
                     .error_message
@@ -5962,7 +6101,7 @@ impl DownloadManager {
                 && self.proxy_config.mode == ProxyMode::Auto
                 && task.proxy_url.is_empty()
                 && !is_bt_url(&task.url)
-                && !crate::ed2k::link::is_ed2k_url(&task.url)
+                && !is_ed2k_url(&task.url)
                 && let Some(host) = crate::segment_coordinator::extract_host(&task.url)
             {
                 let proxy_failed = task.auto_route.starts_with("proxy")
@@ -6112,9 +6251,8 @@ impl DownloadManager {
                     } else {
                         task.origin_url.clone()
                     };
-                    let keep_mtime = self.use_server_time
-                        && !is_bt_url(&task.url)
-                        && !crate::ed2k::link::is_ed2k_url(&task.url);
+                    let keep_mtime =
+                        self.use_server_time && !is_bt_url(&task.url) && !is_ed2k_url(&task.url);
                     crate::mark_of_the_web::spawn_mark_downloaded(
                         target,
                         host_url,
@@ -6186,6 +6324,7 @@ impl DownloadManager {
         self.sync_queue_occupancy();
 
         self.maybe_wal_checkpoint().await;
+        #[cfg(feature = "bt")]
         self.maybe_release_bt_session().await;
     }
 
@@ -6216,6 +6355,7 @@ impl DownloadManager {
     /// [`Self::recheck_bt_session_paused_grace`]（挂在做种求值 tick 上）释放。
     /// 已完成任务不计入本判定（做种由 `has_seeders` 保活，做种关闭的完成任务不
     /// 钉住会话），因此全部 BT 任务终态化后会话仍会立即按既有路径释放。
+    #[cfg(feature = "bt")]
     async fn maybe_release_bt_session(&mut self) {
         self.release_bt_session_if_idle(false).await;
     }
@@ -6223,6 +6363,7 @@ impl DownloadManager {
     /// 宽限复查点：仅当已进入「仅暂停任务保活」的空闲期时才复查，未进入时
     /// （含无会话）是纯内存的 `Option` 判断，零 I/O。只负责宽限到期后的释放——
     /// 其余释放时机仍由各事件驱动路径上的 [`Self::maybe_release_bt_session`] 决定。
+    #[cfg(feature = "bt")]
     async fn recheck_bt_session_paused_grace(&mut self) {
         if self.bt_paused_idle_since.is_none() {
             return;
@@ -6233,6 +6374,7 @@ impl DownloadManager {
     /// 收集 [`decide_bt_session_release`] 所需的保活来源。按代价由低到高短路：
     /// 已有硬保活来源时不再计算后续项（尤其是要遍历句柄取 stats 的
     /// `has_paused_incomplete`）。
+    #[cfg(feature = "bt")]
     async fn bt_session_holds(&self) -> BtSessionHolds {
         let mut holds = BtSessionHolds {
             active_download: self.active_tasks.values().any(|e| e.is_bt),
@@ -6262,6 +6404,7 @@ impl DownloadManager {
     /// [`Self::maybe_release_bt_session`] / [`Self::recheck_bt_session_paused_grace`]
     /// 的共同实现。`periodic` 为 `true` 时来自 5s tick：不刷日志（日志落盘会成为
     /// 空闲期的周期写），且仅在暂停宽限到期时才释放。
+    #[cfg(feature = "bt")]
     async fn release_bt_session_if_idle(&mut self, periodic: bool) {
         if self.bt_session.is_none() {
             self.bt_paused_idle_since = None;
@@ -6436,6 +6579,7 @@ impl DownloadManager {
     /// librqbit 继续做种。挂载失败由 [`Self::spawn_reseed_from_disk`] 的
     /// 现有回退兜底（保持 UserStopped + 失败原因）；无可续任务时不创建
     /// BT 会话，会话创建失败时全部保持停止态。
+    #[cfg(feature = "bt")]
     async fn auto_reseed_on_start(&mut self, stale: Vec<TaskInfo>) {
         let enabled = match self.db.get_config("bt_auto_reseed").await {
             Ok(value) => value.is_none_or(|v| v != "0" && v != "false"),
@@ -6495,6 +6639,7 @@ impl DownloadManager {
 
         let order_db = self.db.clone();
         let order = order_db.lock_event_order().await;
+        #[cfg_attr(not(feature = "bt"), allow(unused_mut))]
         let mut tasks = match self.db.load_all_tasks().await {
             Ok(t) => t,
             Err(error) => {
@@ -6508,34 +6653,39 @@ impl DownloadManager {
         // 标记行本就注定删除，这里补删（仅首次执行）。
         if is_first_run {
             self.startup_reset_done = true;
-            let mut orphans: Vec<String> = tasks
-                .iter()
-                .filter(|t| {
-                    t.status == 4
-                        && t.error_message
-                            .starts_with(bt_downloader::DUPLICATE_TORRENT_MSG_PREFIX)
-                })
-                .map(|t| t.task_id.clone())
-                .collect();
-            if !orphans.is_empty() {
-                let mut removed = 0;
-                for index in 0..orphans.len() {
-                    let tid = &orphans[index];
-                    log_info!(
-                        "[manager] startup: removing orphan duplicate-torrent placeholder {}",
-                        tid
-                    );
-                    match self.db.delete_task(tid).await {
-                        Ok(sources) => {
-                            self.broadcast_deleted_rss_sources(sources).await;
-                            orphans.swap(removed, index);
-                            removed += 1;
+            #[cfg(feature = "bt")]
+            {
+                let mut orphans: Vec<String> = tasks
+                    .iter()
+                    .filter(|t| {
+                        t.status == 4
+                            && t.error_message
+                                .starts_with(bt_downloader::DUPLICATE_TORRENT_MSG_PREFIX)
+                    })
+                    .map(|t| t.task_id.clone())
+                    .collect();
+                if !orphans.is_empty() {
+                    let mut removed = 0;
+                    for index in 0..orphans.len() {
+                        let tid = &orphans[index];
+                        log_info!(
+                            "[manager] startup: removing orphan duplicate-torrent placeholder {}",
+                            tid
+                        );
+                        match self.db.delete_task(tid).await {
+                            Ok(sources) => {
+                                self.broadcast_deleted_rss_sources(sources).await;
+                                orphans.swap(removed, index);
+                                removed += 1;
+                            }
+                            Err(e) => {
+                                log_info!("[manager] startup duplicate cleanup {}: {}", tid, e)
+                            }
                         }
-                        Err(e) => log_info!("[manager] startup duplicate cleanup {}: {}", tid, e),
                     }
+                    orphans.truncate(removed);
+                    tasks.retain(|t| !orphans.contains(&t.task_id));
                 }
-                orphans.truncate(removed);
-                tasks.retain(|t| !orphans.contains(&t.task_id));
             }
         }
 
@@ -6549,6 +6699,7 @@ impl DownloadManager {
         //      staging directory is currently being written to.
         //   3. `startup_reset_done` gates this to a single execution per
         //      process lifetime, matching the intent of the startup-only reset.
+        #[cfg(feature = "bt")]
         if is_first_run {
             'startup_cleanup: {
                 // ---------------------------------------------------------------
@@ -6831,8 +6982,11 @@ impl DownloadManager {
             self.spawn_file_scan();
             // 残留做种态先归一化为 UserStopped（崩溃安全底线），随后按
             // `bt_auto_reseed` 决定是否自动重新挂载做种。
-            let stale = self.reset_stale_seeding().await;
-            self.auto_reseed_on_start(stale).await;
+            #[cfg(feature = "bt")]
+            {
+                let stale = self.reset_stale_seeding().await;
+                self.auto_reseed_on_start(stale).await;
+            }
             self.auto_resume_on_start(reset_ids).await;
         }
     }
@@ -7327,6 +7481,15 @@ impl DownloadManager {
             );
             return PrepareOutcome::Rejected(CreateRejection::BtDisabled);
         }
+        // 无 eD2K 后端（编译期剔除）：ed2k:// 链接同样明确拒绝，不落库。
+        #[cfg(not(feature = "ed2k"))]
+        if is_ed2k_url(&url) {
+            log_info!(
+                "[manager] ed2k download rejected: {}",
+                UNSUPPORTED_PROTOCOL_MESSAGE
+            );
+            return PrepareOutcome::Rejected(CreateRejection::UnsupportedProtocol);
+        }
         // URL 去重（config `dedup_same_url`，默认关闭）：种子上传没有真实 URL 可比较。
         if torrent_file_bytes.is_empty()
             && !url.is_empty()
@@ -7382,7 +7545,8 @@ impl DownloadManager {
         };
         // ED2K 链接自带文件名/大小/root hash：调用方未显式给名时从链接回填，
         // 并把 hint_file_size 设为链接声明的大小（run_ed2k_download 以链接为准）。
-        let (file_name, hint_file_size) = if crate::ed2k::link::is_ed2k_url(&url) {
+        #[cfg(feature = "ed2k")]
+        let (file_name, hint_file_size) = if is_ed2k_url(&url) {
             match crate::ed2k::link::parse_ed2k_link(&url) {
                 Ok(link) => {
                     let name = if file_name.trim().is_empty() {
@@ -8152,7 +8316,10 @@ impl DownloadManager {
             checksum,
             ignore_tls_errors,
             extra_headers,
+            #[cfg(feature = "bt")]
             selected_file_indices,
+            #[cfg(not(feature = "bt"))]
+                selected_file_indices: _,
             method,
             body,
             audio_url,
@@ -8233,7 +8400,7 @@ impl DownloadManager {
         // 轨对任务（audio_url 非空）复用 DASH 下载器的下载+mux 能力，与 .mpd 后缀正交。
         let use_dash = dash_downloader::is_dash_url(&url) || audio_url.is_some();
         let use_bt = is_magnet(&url) || !torrent_file_bytes.is_empty() || is_torrent_file_url(&url);
-        let use_ed2k = crate::ed2k::link::is_ed2k_url(&url);
+        let use_ed2k = is_ed2k_url(&url);
 
         // Insert a placeholder entry now so capacity/queue checks are correct
         // for any reentrant calls that may occur during BT session init below.
@@ -8252,8 +8419,11 @@ impl DownloadManager {
         let speed_limiter = self.queue_limiter_for(&queue_id);
 
         let done_tx = self.done_tx.clone();
+        #[cfg(feature = "bt")]
         let panic_progress_tx = self.progress_tx.clone();
+        #[cfg(feature = "bt")]
         let panic_task_id = task_id.clone();
+        #[cfg(feature = "bt")]
         let panic_db = self.db.clone();
         let task_span = tracing::error_span!("download_task", task_id = %task_id);
 
@@ -8293,165 +8463,179 @@ impl DownloadManager {
                 self.active_tasks.remove(&task_id);
                 return;
             }
-            // bt_session is guaranteed to be Some after ensure_bt_session().
-            let Some(bt_ref) = self.bt_session.as_ref() else {
-                crate::log_error!(
-                    "[manager] BUG: bt_session is None after ensure_bt_session succeeded"
-                );
-                self.active_tasks.remove(&task_id);
-                return;
-            };
-
-            // Build the torrent source: prefer torrent file bytes if available,
-            // otherwise use the URL as a magnet link.
-            // Capture whether this is a .torrent-file task BEFORE the bytes
-            // are moved into TorrentSource below.
-            let is_torrent_file_task = !torrent_file_bytes.is_empty();
-            let torrent_source = if is_torrent_file_task {
-                TorrentSource::TorrentFileBytes(torrent_file_bytes)
-            } else {
-                TorrentSource::Magnet(url)
-            };
-
-            // Validate and persist user-specified custom name for BT rename.
-            //
-            // Only treat file_name as a custom rename target when the task
-            // comes from a magnet URL and the user explicitly typed a name.
-            // For .torrent-file tasks the file_name is auto-derived from the
-            // .torrent filename (without the ".torrent" extension) by the client
-            // layer — it has no extension and does not represent the user's
-            // intent to rename the download.  Using it as custom_name would
-            // cause the completed file to be saved without its real extension
-            // (e.g. "cachyos-desktop-linux-260308" instead of
-            // "cachyos-desktop-linux-260308.iso").
-            //
-            // The same trap exists for magnet tasks: the magnet `dn` display
-            // name (usually extension-less, e.g. "Sintel") flows back as
-            // file_name from every entry point that pre-fills it (browser
-            // extension NMH `filename=`, the new-task dialog prefill), and it
-            // is NOT a rename request — qBittorrent treats `dn` purely as a
-            // cosmetic placeholder until metadata arrives, never as the disk
-            // name.  So a file_name that merely echoes `dn` is ignored; only
-            // a name that differs from `dn` proves user intent.
-            //
-            // Rule: custom_name is only honoured for magnet-URL tasks where
-            // file_name is non-empty, safe, and differs from the magnet `dn`.
-            // Torrent-file tasks always discover their real name from
-            // metadata and never rename.
-            let dn_echo = torrent_source.display_name().unwrap_or_default();
-            let custom_name = if is_torrent_file_task {
-                // Task created from a .torrent file — ignore file_name.
-                String::new()
-            } else if is_safe_file_name(&file_name) && file_name != dn_echo {
-                // Magnet task with a user-supplied name.
-                file_name.clone()
-            } else {
-                String::new()
-            };
-            if !custom_name.is_empty()
-                && let Err(error) = self.db.save_bt_custom_name(&task_id, &custom_name).await
+            #[cfg(feature = "bt")]
             {
-                crate::logger::report_error("download-manager", "persist task state", &error);
-                persist_task_failure(
-                    &task_id,
-                    format!("persist BT custom name: {error}"),
-                    &self.db,
-                    &self.progress_tx,
+                // bt_session is guaranteed to be Some after ensure_bt_session().
+                let Some(bt_ref) = self.bt_session.as_ref() else {
+                    crate::log_error!(
+                        "[manager] BUG: bt_session is None after ensure_bt_session succeeded"
+                    );
+                    self.active_tasks.remove(&task_id);
+                    return;
+                };
+
+                // Build the torrent source: prefer torrent file bytes if available,
+                // otherwise use the URL as a magnet link.
+                // Capture whether this is a .torrent-file task BEFORE the bytes
+                // are moved into TorrentSource below.
+                let is_torrent_file_task = !torrent_file_bytes.is_empty();
+                let torrent_source = if is_torrent_file_task {
+                    TorrentSource::TorrentFileBytes(torrent_file_bytes)
+                } else {
+                    TorrentSource::Magnet(url)
+                };
+
+                // Validate and persist user-specified custom name for BT rename.
+                //
+                // Only treat file_name as a custom rename target when the task
+                // comes from a magnet URL and the user explicitly typed a name.
+                // For .torrent-file tasks the file_name is auto-derived from the
+                // .torrent filename (without the ".torrent" extension) by the client
+                // layer — it has no extension and does not represent the user's
+                // intent to rename the download.  Using it as custom_name would
+                // cause the completed file to be saved without its real extension
+                // (e.g. "cachyos-desktop-linux-260308" instead of
+                // "cachyos-desktop-linux-260308.iso").
+                //
+                // The same trap exists for magnet tasks: the magnet `dn` display
+                // name (usually extension-less, e.g. "Sintel") flows back as
+                // file_name from every entry point that pre-fills it (browser
+                // extension NMH `filename=`, the new-task dialog prefill), and it
+                // is NOT a rename request — qBittorrent treats `dn` purely as a
+                // cosmetic placeholder until metadata arrives, never as the disk
+                // name.  So a file_name that merely echoes `dn` is ignored; only
+                // a name that differs from `dn` proves user intent.
+                //
+                // Rule: custom_name is only honoured for magnet-URL tasks where
+                // file_name is non-empty, safe, and differs from the magnet `dn`.
+                // Torrent-file tasks always discover their real name from
+                // metadata and never rename.
+                let dn_echo = torrent_source.display_name().unwrap_or_default();
+                let custom_name = if is_torrent_file_task {
+                    // Task created from a .torrent file — ignore file_name.
+                    String::new()
+                } else if is_safe_file_name(&file_name) && file_name != dn_echo {
+                    // Magnet task with a user-supplied name.
+                    file_name.clone()
+                } else {
+                    String::new()
+                };
+                if !custom_name.is_empty()
+                    && let Err(error) = self.db.save_bt_custom_name(&task_id, &custom_name).await
+                {
+                    crate::logger::report_error("download-manager", "persist task state", &error);
+                    persist_task_failure(
+                        &task_id,
+                        format!("persist BT custom name: {error}"),
+                        &self.db,
+                        &self.progress_tx,
+                    )
+                    .await;
+                    self.active_tasks.remove(&task_id);
+                    return;
+                }
+
+                // 首启也要尊重**已持久化**的文件选择，而不是无脑弹框：无人值守
+                // 入口（RSS）在 `create_task` 里已经把「全部文件」写进 DB，读到
+                // `Some([])` 就该直接跳过对话框。此前这里硬编码 `false`，与
+                // `do_resume_task` 的三态读取行为分叉，导致 RSS 每建一个 BT 任务
+                // 都弹一次选择框（且用户点「取消」后条目仍被标记「已下载」）。
+                let (bt_pre_selected, bt_skip_selection) = match self
+                    .db
+                    .load_bt_selected_files(&task_id)
+                    .await
+                    .unwrap_or(None)
+                {
+                    None => (Vec::new(), false),
+                    Some(indices) if indices.is_empty() => (Vec::new(), true),
+                    Some(indices) => (indices, false),
+                };
+
+                let bt_params = BtDownloadParams {
+                    task_id: task_id.clone(),
+                    torrent_source,
+                    save_dir,
+                    db: self.db.clone(),
+                    progress_tx: self.progress_tx.clone(),
+                    cancel_token,
+                    session: bt_ref.session(),
+                    bt_runtime: bt_ref.runtime_handle(),
+                    shared_bt: bt_ref.clone(),
+                    existing_handle: None,
+                    pre_selected_indices: if bt_pre_selected.is_empty() {
+                        selected_file_indices
+                    } else {
+                        bt_pre_selected
+                    },
+                    skip_file_selection: bt_skip_selection,
+                    custom_name,
+                    selector: self.selector.clone(),
+                    sink: self.sink.clone(),
+                    // 任务级/队列级上传限速只能在 add 时烘焙（librqbit 无
+                    // per-torrent 热更 API）；行刚插入时任务级通常为 0，恢复/
+                    // 续种路径会带上用户后来设置的值。
+                    upload_limit_bps: match self.db.load_task_by_id(&task_id).await {
+                        Ok(Some(t)) => self.effective_task_upload_bps(&t),
+                        _ => 0,
+                    },
+                };
+
+                tokio::spawn(
+                    async move {
+                        let result =
+                            std::panic::AssertUnwindSafe(bt_downloader::run_bt_download(bt_params))
+                                .catch_unwind()
+                                .await;
+
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(downloader::DownloadError::Cancelled)) => {
+                                tracing::debug!("BT download worker cancelled");
+                            }
+                            Ok(Err(error)) => {
+                                handle_bt_worker_error(
+                                    &panic_task_id,
+                                    &error,
+                                    &panic_db,
+                                    &panic_progress_tx,
+                                )
+                                .await;
+                            }
+                            Err(panic_info) => {
+                                let msg = panic_message(&panic_info);
+                                handle_task_panic(
+                                    &panic_task_id,
+                                    msg,
+                                    &panic_db,
+                                    &panic_progress_tx,
+                                )
+                                .await;
+                            }
+                        }
+
+                        if done_tx
+                            .send(TaskDone {
+                                task_id: panic_task_id,
+                                generation: spawn_gen,
+                                reserved_temp_path: None, // BT 任务不使用文件名预订机制
+                                phase: TaskDonePhase::Finished,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            // 接收方随 actor/预览生命周期退出，不再需要此一次性通知。
+                            tracing::debug!("download-manager notification receiver closed");
+                        }
+                    }
+                    .instrument(task_span),
                 )
-                .await;
+            }
+            // 无 BT 后端：`ensure_bt_session` 恒返回错误并已在上面处理完毕。
+            #[cfg(not(feature = "bt"))]
+            {
                 self.active_tasks.remove(&task_id);
                 return;
             }
-
-            // 首启也要尊重**已持久化**的文件选择，而不是无脑弹框：无人值守
-            // 入口（RSS）在 `create_task` 里已经把「全部文件」写进 DB，读到
-            // `Some([])` 就该直接跳过对话框。此前这里硬编码 `false`，与
-            // `do_resume_task` 的三态读取行为分叉，导致 RSS 每建一个 BT 任务
-            // 都弹一次选择框（且用户点「取消」后条目仍被标记「已下载」）。
-            let (bt_pre_selected, bt_skip_selection) = match self
-                .db
-                .load_bt_selected_files(&task_id)
-                .await
-                .unwrap_or(None)
-            {
-                None => (Vec::new(), false),
-                Some(indices) if indices.is_empty() => (Vec::new(), true),
-                Some(indices) => (indices, false),
-            };
-
-            let bt_params = BtDownloadParams {
-                task_id: task_id.clone(),
-                torrent_source,
-                save_dir,
-                db: self.db.clone(),
-                progress_tx: self.progress_tx.clone(),
-                cancel_token,
-                session: bt_ref.session(),
-                bt_runtime: bt_ref.runtime_handle(),
-                shared_bt: bt_ref.clone(),
-                existing_handle: None,
-                pre_selected_indices: if bt_pre_selected.is_empty() {
-                    selected_file_indices
-                } else {
-                    bt_pre_selected
-                },
-                skip_file_selection: bt_skip_selection,
-                custom_name,
-                selector: self.selector.clone(),
-                sink: self.sink.clone(),
-                // 任务级/队列级上传限速只能在 add 时烘焙（librqbit 无
-                // per-torrent 热更 API）；行刚插入时任务级通常为 0，恢复/
-                // 续种路径会带上用户后来设置的值。
-                upload_limit_bps: match self.db.load_task_by_id(&task_id).await {
-                    Ok(Some(t)) => self.effective_task_upload_bps(&t),
-                    _ => 0,
-                },
-            };
-
-            tokio::spawn(
-                async move {
-                    let result =
-                        std::panic::AssertUnwindSafe(bt_downloader::run_bt_download(bt_params))
-                            .catch_unwind()
-                            .await;
-
-                    match result {
-                        Ok(Ok(())) => {}
-                        Ok(Err(downloader::DownloadError::Cancelled)) => {
-                            tracing::debug!("BT download worker cancelled");
-                        }
-                        Ok(Err(error)) => {
-                            handle_bt_worker_error(
-                                &panic_task_id,
-                                &error,
-                                &panic_db,
-                                &panic_progress_tx,
-                            )
-                            .await;
-                        }
-                        Err(panic_info) => {
-                            let msg = panic_message(&panic_info);
-                            handle_task_panic(&panic_task_id, msg, &panic_db, &panic_progress_tx)
-                                .await;
-                        }
-                    }
-
-                    if done_tx
-                        .send(TaskDone {
-                            task_id: panic_task_id,
-                            generation: spawn_gen,
-                            reserved_temp_path: None, // BT 任务不使用文件名预订机制
-                            phase: TaskDonePhase::Finished,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        // 接收方随 actor/预览生命周期退出，不再需要此一次性通知。
-                        tracing::debug!("download-manager notification receiver closed");
-                    }
-                }
-                .instrument(task_span),
-            )
         } else {
             let (task_client, task_proxy, (auto_route, auto_ctx)) =
                 self.task_http_context(&url, &proxy_url, &user_agent, &queue_id, ignore_tls_errors);
@@ -8789,6 +8973,7 @@ impl DownloadManager {
             // no-op if the download loop already called session.pause on
             // cancellation detection, but covers edge cases (e.g. pause
             // during metadata resolution).
+            #[cfg(feature = "bt")]
             if let Some(ref bt) = self.bt_session
                 && let Err(error) = bt.pause_task(task_id).await
             {
@@ -8843,6 +9028,7 @@ impl DownloadManager {
         {
             match task.seeding_status {
                 s if s == SEEDING_STATUS_ACTIVE || s == SEEDING_STATUS_QUEUED => {
+                    #[cfg(feature = "bt")]
                     if let Some(ref bt) = self.bt_session {
                         if let Err(error) = bt.pause_task(task_id).await {
                             crate::logger::report_error(
@@ -9266,6 +9452,7 @@ impl DownloadManager {
 
         // 已完成任务的做种恢复走专用分支（停止态 → 重新做种/排队），
         // 绝不进入普通恢复/下载流水线。
+        #[cfg(feature = "bt")]
         if let Some(ref task) = task_row
             && self.try_resume_seeding(task_id, task).await
         {
@@ -9508,7 +9695,7 @@ impl DownloadManager {
             self.park_bt_disabled_task(task_id).await;
             return;
         }
-        let use_ed2k = crate::ed2k::link::is_ed2k_url(&task.url);
+        let use_ed2k = is_ed2k_url(&task.url);
 
         // Insert placeholder entry (handle filled in after tokio::spawn).
         self.active_tasks.insert(
@@ -9526,8 +9713,11 @@ impl DownloadManager {
 
         let tid = task_id.to_string();
         let done_tx = self.done_tx.clone();
+        #[cfg(feature = "bt")]
         let panic_progress_tx = self.progress_tx.clone();
+        #[cfg(feature = "bt")]
         let panic_task_id = tid.clone();
+        #[cfg(feature = "bt")]
         let panic_db = self.db.clone();
         let task_span = tracing::error_span!("download_task", task_id = %tid);
 
@@ -9564,222 +9754,236 @@ impl DownloadManager {
                 self.active_tasks.remove(task_id);
                 return;
             }
-            // bt_session is guaranteed to be Some after ensure_bt_session().
-            let Some(bt_ref) = self.bt_session.as_ref() else {
-                crate::log_error!(
-                    "[manager] BUG: bt_session is None after ensure_bt_session succeeded"
-                );
-                self.active_tasks.remove(task_id);
-                return;
-            };
-
-            // Try to resume from a cached handle (pause→resume within the
-            // same app session).  If the handle is found, unpause it and
-            // pass it to the download loop so it skips add_torrent entirely.
-            let mut existing = match bt_ref.resume_task(task_id).await {
-                Ok(h) => h,
-                Err(e) => {
-                    crate::log_warn!("[manager] BT resume_task error (will re-add): {}", e);
-                    None
-                }
-            };
-
-            // Guard: if the user deleted the download files while the task
-            // was paused (within the same app session), the cached handle's
-            // in-memory piece bitfield is stale.  Reusing it would produce a
-            // corrupt file because librqbit thinks pieces are present when
-            // the underlying data is gone.  Detect this by checking whether
-            // the output path still exists on disk.  If not, discard the
-            // cached handle so that add_torrent runs full re-verification.
-            if existing.is_some() && !task.file_name.is_empty() {
-                let output_path = PathBuf::from(&task.save_dir).join(&task.file_name);
-                // Also check the task-scoped staging directory: a paused
-                // download that hasn't finished yet will have its data in
-                // save_dir/.bt_stage_<task_id>/ rather than at the final path.
-                //
-                // The staging check requires actual data, not mere existence:
-                // if the user (or an external tool) deleted the staged FILE
-                // while the empty directory survived, the cached handle's
-                // in-memory piece bitfield would claim pieces that are gone
-                // from disk — librqbit would re-create the file sparse, never
-                // re-download those pieces, and "complete" a file with
-                // zero-filled holes (BUG-BT-PHANTOM-PIECES).
-                let stage_path = bt_downloader::bt_stage_dir(&task.save_dir, task_id);
-                let output_present =
-                    output_path.exists() || bt_downloader::stage_dir_has_real_data(&stage_path);
-                if !output_present {
-                    log_info!(
-                        "[manager] BT task {} output missing/empty ({} and {}), discarding cached handle for re-verify",
-                        task_id,
-                        output_path.display(),
-                        stage_path.display(),
+            #[cfg(feature = "bt")]
+            {
+                // bt_session is guaranteed to be Some after ensure_bt_session().
+                let Some(bt_ref) = self.bt_session.as_ref() else {
+                    crate::log_error!(
+                        "[manager] BUG: bt_session is None after ensure_bt_session succeeded"
                     );
-                    // Delete the stale torrent from the session so add_torrent
-                    // can re-add it fresh with proper piece verification.
-                    // session.delete also drops the {hash}.bitv fastresume
-                    // file, so the re-add cannot restore phantom pieces.
-                    if let Err(error) = bt_ref.delete_task(task_id, false).await {
-                        crate::logger::report_error(
-                            "download-manager",
-                            "discard stale BT handle",
-                            &error,
+                    self.active_tasks.remove(task_id);
+                    return;
+                };
+
+                // Try to resume from a cached handle (pause→resume within the
+                // same app session).  If the handle is found, unpause it and
+                // pass it to the download loop so it skips add_torrent entirely.
+                let mut existing = match bt_ref.resume_task(task_id).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        crate::log_warn!("[manager] BT resume_task error (will re-add): {}", e);
+                        None
+                    }
+                };
+
+                // Guard: if the user deleted the download files while the task
+                // was paused (within the same app session), the cached handle's
+                // in-memory piece bitfield is stale.  Reusing it would produce a
+                // corrupt file because librqbit thinks pieces are present when
+                // the underlying data is gone.  Detect this by checking whether
+                // the output path still exists on disk.  If not, discard the
+                // cached handle so that add_torrent runs full re-verification.
+                if existing.is_some() && !task.file_name.is_empty() {
+                    let output_path = PathBuf::from(&task.save_dir).join(&task.file_name);
+                    // Also check the task-scoped staging directory: a paused
+                    // download that hasn't finished yet will have its data in
+                    // save_dir/.bt_stage_<task_id>/ rather than at the final path.
+                    //
+                    // The staging check requires actual data, not mere existence:
+                    // if the user (or an external tool) deleted the staged FILE
+                    // while the empty directory survived, the cached handle's
+                    // in-memory piece bitfield would claim pieces that are gone
+                    // from disk — librqbit would re-create the file sparse, never
+                    // re-download those pieces, and "complete" a file with
+                    // zero-filled holes (BUG-BT-PHANTOM-PIECES).
+                    let stage_path = bt_downloader::bt_stage_dir(&task.save_dir, task_id);
+                    let output_present =
+                        output_path.exists() || bt_downloader::stage_dir_has_real_data(&stage_path);
+                    if !output_present {
+                        log_info!(
+                            "[manager] BT task {} output missing/empty ({} and {}), discarding cached handle for re-verify",
+                            task_id,
+                            output_path.display(),
+                            stage_path.display(),
                         );
+                        // Delete the stale torrent from the session so add_torrent
+                        // can re-add it fresh with proper piece verification.
+                        // session.delete also drops the {hash}.bitv fastresume
+                        // file, so the re-add cannot restore phantom pieces.
+                        if let Err(error) = bt_ref.delete_task(task_id, false).await {
+                            crate::logger::report_error(
+                                "download-manager",
+                                "discard stale BT handle",
+                                &error,
+                            );
+                            self.active_tasks.remove(task_id);
+                            return;
+                        }
+                        existing = None;
+                    }
+                }
+
+                // Build the torrent source for resume: if the task was created
+                // from a .torrent file, load the persisted bytes from DB.
+                let torrent_source = if is_torrent_file_url(&task.url) {
+                    let bytes = self
+                        .db
+                        .load_torrent_file_bytes(task_id)
+                        .await
+                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    if bytes.is_empty() {
+                        log_info!(
+                            "[manager] BT task {} has torrent-file:// URL but no persisted bytes!",
+                            task_id
+                        );
+                        let msg = "torrent file bytes lost — cannot resume";
+                        if let Err(error) = self.db.update_task_status(task_id, 4, msg).await {
+                            crate::logger::report_error(
+                                "download-manager",
+                                "persist task state",
+                                &error,
+                            );
+                        }
                         self.active_tasks.remove(task_id);
                         return;
                     }
-                    existing = None;
-                }
-            }
-
-            // Build the torrent source for resume: if the task was created
-            // from a .torrent file, load the persisted bytes from DB.
-            let torrent_source = if is_torrent_file_url(&task.url) {
-                let bytes = self
-                    .db
-                    .load_torrent_file_bytes(task_id)
-                    .await
-                    .unwrap_or_default()
-                    .unwrap_or_default();
-                if bytes.is_empty() {
-                    log_info!(
-                        "[manager] BT task {} has torrent-file:// URL but no persisted bytes!",
-                        task_id
-                    );
-                    let msg = "torrent file bytes lost — cannot resume";
-                    if let Err(error) = self.db.update_task_status(task_id, 4, msg).await {
-                        crate::logger::report_error(
-                            "download-manager",
-                            "persist task state",
-                            &error,
-                        );
-                    }
-                    self.active_tasks.remove(task_id);
-                    return;
-                }
-                TorrentSource::TorrentFileBytes(bytes)
-            } else {
-                TorrentSource::Magnet(task.url.clone())
-            };
-
-            // Load the persisted file selection from DB so that resumes
-            // (including across app restarts where the in-memory handle is
-            // gone) skip the file-selection dialog entirely.
-            //
-            // load_bt_selected_files returns:
-            //   None        — user never confirmed a selection → show dialog
-            //   Some([])    — user confirmed "all files" → skip dialog, no update_only_files
-            //   Some([…])   — user confirmed a subset → skip dialog, apply update_only_files
-            //
-            // When existing_handle is Some (same-session resume), librqbit
-            // already has the correct state; had_existing_handle=true in
-            // bt_download_inner skips Phase 3.5 regardless of what we pass here.
-            let (pre_selected_indices, skip_file_selection) = if existing.is_none() {
-                match self
-                    .db
-                    .load_bt_selected_files(task_id)
-                    .await
-                    .unwrap_or(None)
-                {
-                    None => {
-                        // Never confirmed — let Phase 3.5 show the dialog.
-                        (Vec::new(), false)
-                    }
-                    Some(indices) if indices.is_empty() => {
-                        // Confirmed "all files" — skip dialog, librqbit default is all.
-                        (Vec::new(), true)
-                    }
-                    Some(indices) => {
-                        // Confirmed subset — skip dialog, apply update_only_files.
-                        (indices, false)
-                    }
-                }
-            } else {
-                // Existing handle: had_existing_handle handles everything.
-                (Vec::new(), false)
-            };
-
-            // Load user-specified custom name from DB for BT rename on completion.
-            // 存量防护:修复前创建的任务可能把 magnet `dn` 回显误存成了
-            // custom_name(见 do_start_task 的 dn_echo 规则)——恢复时同样按
-            // 「等于 dn 即非重命名」豁免,避免完成落盘丢真实扩展名。
-            let custom_name = {
-                let loaded = self
-                    .db
-                    .load_bt_custom_name(task_id)
-                    .await
-                    .unwrap_or_default();
-                let dn_echo = torrent_source.display_name().unwrap_or_default();
-                if !loaded.is_empty() && loaded == dn_echo {
-                    String::new()
+                    TorrentSource::TorrentFileBytes(bytes)
                 } else {
-                    loaded
-                }
-            };
+                    TorrentSource::Magnet(task.url.clone())
+                };
 
-            let upload_limit_bps = self.effective_task_upload_bps(&task);
-            let bt_params = BtDownloadParams {
-                task_id: tid.clone(),
-                torrent_source,
-                save_dir: task.save_dir,
-                db: self.db.clone(),
-                progress_tx: self.progress_tx.clone(),
-                cancel_token,
-                session: bt_ref.session(),
-                bt_runtime: bt_ref.runtime_handle(),
-                shared_bt: bt_ref.clone(),
-                existing_handle: existing,
-                pre_selected_indices,
-                skip_file_selection,
-                custom_name,
-                selector: self.selector.clone(),
-                sink: self.sink.clone(),
-                upload_limit_bps,
-            };
-
-            tokio::spawn(
-                async move {
-                    let result =
-                        std::panic::AssertUnwindSafe(bt_downloader::run_bt_download(bt_params))
-                            .catch_unwind()
-                            .await;
-
-                    match result {
-                        Ok(Ok(())) => {}
-                        Ok(Err(downloader::DownloadError::Cancelled)) => {
-                            tracing::debug!("BT download worker cancelled");
-                        }
-                        Ok(Err(error)) => {
-                            handle_bt_worker_error(
-                                &panic_task_id,
-                                &error,
-                                &panic_db,
-                                &panic_progress_tx,
-                            )
-                            .await;
-                        }
-                        Err(panic_info) => {
-                            let msg = panic_message(&panic_info);
-                            handle_task_panic(&panic_task_id, msg, &panic_db, &panic_progress_tx)
-                                .await;
-                        }
-                    }
-
-                    if done_tx
-                        .send(TaskDone {
-                            task_id: panic_task_id,
-                            generation: spawn_gen,
-                            reserved_temp_path: None, // BT 任务不使用文件名预订机制
-                            phase: TaskDonePhase::Finished,
-                        })
+                // Load the persisted file selection from DB so that resumes
+                // (including across app restarts where the in-memory handle is
+                // gone) skip the file-selection dialog entirely.
+                //
+                // load_bt_selected_files returns:
+                //   None        — user never confirmed a selection → show dialog
+                //   Some([])    — user confirmed "all files" → skip dialog, no update_only_files
+                //   Some([…])   — user confirmed a subset → skip dialog, apply update_only_files
+                //
+                // When existing_handle is Some (same-session resume), librqbit
+                // already has the correct state; had_existing_handle=true in
+                // bt_download_inner skips Phase 3.5 regardless of what we pass here.
+                let (pre_selected_indices, skip_file_selection) = if existing.is_none() {
+                    match self
+                        .db
+                        .load_bt_selected_files(task_id)
                         .await
-                        .is_err()
+                        .unwrap_or(None)
                     {
-                        // 接收方随 actor/预览生命周期退出，不再需要此一次性通知。
-                        tracing::debug!("download-manager notification receiver closed");
+                        None => {
+                            // Never confirmed — let Phase 3.5 show the dialog.
+                            (Vec::new(), false)
+                        }
+                        Some(indices) if indices.is_empty() => {
+                            // Confirmed "all files" — skip dialog, librqbit default is all.
+                            (Vec::new(), true)
+                        }
+                        Some(indices) => {
+                            // Confirmed subset — skip dialog, apply update_only_files.
+                            (indices, false)
+                        }
                     }
-                }
-                .instrument(task_span),
-            )
+                } else {
+                    // Existing handle: had_existing_handle handles everything.
+                    (Vec::new(), false)
+                };
+
+                // Load user-specified custom name from DB for BT rename on completion.
+                // 存量防护:修复前创建的任务可能把 magnet `dn` 回显误存成了
+                // custom_name(见 do_start_task 的 dn_echo 规则)——恢复时同样按
+                // 「等于 dn 即非重命名」豁免,避免完成落盘丢真实扩展名。
+                let custom_name = {
+                    let loaded = self
+                        .db
+                        .load_bt_custom_name(task_id)
+                        .await
+                        .unwrap_or_default();
+                    let dn_echo = torrent_source.display_name().unwrap_or_default();
+                    if !loaded.is_empty() && loaded == dn_echo {
+                        String::new()
+                    } else {
+                        loaded
+                    }
+                };
+
+                let upload_limit_bps = self.effective_task_upload_bps(&task);
+                let bt_params = BtDownloadParams {
+                    task_id: tid.clone(),
+                    torrent_source,
+                    save_dir: task.save_dir,
+                    db: self.db.clone(),
+                    progress_tx: self.progress_tx.clone(),
+                    cancel_token,
+                    session: bt_ref.session(),
+                    bt_runtime: bt_ref.runtime_handle(),
+                    shared_bt: bt_ref.clone(),
+                    existing_handle: existing,
+                    pre_selected_indices,
+                    skip_file_selection,
+                    custom_name,
+                    selector: self.selector.clone(),
+                    sink: self.sink.clone(),
+                    upload_limit_bps,
+                };
+
+                tokio::spawn(
+                    async move {
+                        let result =
+                            std::panic::AssertUnwindSafe(bt_downloader::run_bt_download(bt_params))
+                                .catch_unwind()
+                                .await;
+
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(downloader::DownloadError::Cancelled)) => {
+                                tracing::debug!("BT download worker cancelled");
+                            }
+                            Ok(Err(error)) => {
+                                handle_bt_worker_error(
+                                    &panic_task_id,
+                                    &error,
+                                    &panic_db,
+                                    &panic_progress_tx,
+                                )
+                                .await;
+                            }
+                            Err(panic_info) => {
+                                let msg = panic_message(&panic_info);
+                                handle_task_panic(
+                                    &panic_task_id,
+                                    msg,
+                                    &panic_db,
+                                    &panic_progress_tx,
+                                )
+                                .await;
+                            }
+                        }
+
+                        if done_tx
+                            .send(TaskDone {
+                                task_id: panic_task_id,
+                                generation: spawn_gen,
+                                reserved_temp_path: None, // BT 任务不使用文件名预订机制
+                                phase: TaskDonePhase::Finished,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            // 接收方随 actor/预览生命周期退出，不再需要此一次性通知。
+                            tracing::debug!("download-manager notification receiver closed");
+                        }
+                    }
+                    .instrument(task_span),
+                )
+            }
+            // 无 BT 后端：`ensure_bt_session` 恒返回错误并已在上面处理完毕。
+            #[cfg(not(feature = "bt"))]
+            {
+                self.active_tasks.remove(task_id);
+                return;
+            }
         } else {
             // 恢复时优先沿用任务快照里的显式 User-Agent；否则重新解析队列/全局
             // 默认值。cookies/referrer/extra_headers 已在上方从 DB 恢复。
@@ -10057,6 +10261,7 @@ impl DownloadManager {
             // For BT tasks, explicitly pause the torrent in the session so
             // that fast-resume data is preserved and the user can resume later.
             // This mirrors what pause_task does for BT tasks.
+            #[cfg(feature = "bt")]
             if entry.is_bt
                 && let Some(ref bt) = self.bt_session
                 && let Err(error) = bt.pause_task(task_id).await
@@ -10076,6 +10281,7 @@ impl DownloadManager {
         {
             crate::logger::report_error("download-manager", "persist task state", &error);
             self.drain_queue().await;
+            #[cfg(feature = "bt")]
             self.maybe_release_bt_session().await;
             return;
         }
@@ -10090,6 +10296,7 @@ impl DownloadManager {
                     &error,
                 );
                 self.drain_queue().await;
+                #[cfg(feature = "bt")]
                 self.maybe_release_bt_session().await;
                 return;
             }
@@ -10151,6 +10358,7 @@ impl DownloadManager {
 
         // A slot freed up — try to start queued tasks.
         self.drain_queue().await;
+        #[cfg(feature = "bt")]
         self.maybe_release_bt_session().await;
     }
 
@@ -10186,6 +10394,9 @@ impl DownloadManager {
 
         // Cancel the active download (if any) and wait for the spawned task
         // to exit, ensuring all network sockets and file handles are closed.
+        // 先声明"删除":HLS 直播在任务令牌取消(= 停止并保存)时会把已录内容定稿,
+        // 删除不能走这条路径。登记在等待下载器退出之后释放。
+        hls_downloader::request_discard(task_id);
         let maybe_handle = if let Some(entry) = self.active_tasks.remove(task_id) {
             entry.token.cancel();
             entry.handle
@@ -10208,6 +10419,7 @@ impl DownloadManager {
         } else {
             false
         };
+        hls_downloader::clear_discard(task_id);
         if handle_timed_out {
             log_info!(
                 "[manager] delete_task {}: handle wait timed out, spawned task may still be running",
@@ -10277,55 +10489,58 @@ impl DownloadManager {
             let path = PathBuf::from(&t.save_dir).join(&t.file_name);
 
             if is_bt_url(&t.url) {
-                // Permanently remove from librqbit session (clears
-                // persistence data and optionally deletes files via
-                // librqbit's own cleanup).
-                if let Some(ref bt) = self.bt_session {
-                    let handle_found = match bt.delete_task(task_id, delete_files).await {
-                        Ok(found) => found,
-                        Err(error) => {
-                            crate::logger::report_error(
-                                "download-manager",
-                                "delete BT task",
-                                &error,
-                            );
-                            self.drain_queue().await;
-                            return;
+                #[cfg(feature = "bt")]
+                {
+                    // Permanently remove from librqbit session (clears
+                    // persistence data and optionally deletes files via
+                    // librqbit's own cleanup).
+                    if let Some(ref bt) = self.bt_session {
+                        let handle_found = match bt.delete_task(task_id, delete_files).await {
+                            Ok(found) => found,
+                            Err(error) => {
+                                crate::logger::report_error(
+                                    "download-manager",
+                                    "delete BT task",
+                                    &error,
+                                );
+                                self.drain_queue().await;
+                                return;
+                            }
+                        };
+                        if !handle_found {
+                            // Handle not in map: the task is still in the
+                            // add_torrent phase (e.g. magnet DHT resolution)
+                            // or a reseed's local-data check is in flight.
+                            // Register a pending delete so the detached
+                            // add_torrent closure / reseed closure cleans up the
+                            // librqbit session entry (and files) once it resolves.
+                            bt.register_pending_delete(task_id, delete_files).await;
+                            // 二次检查：上面 miss 与 pending 写入之间存在 await
+                            // 窗口，句柄可能恰好在此期间落位（且对方闭包的
+                            // pending 检查已经跑完拿了个空）——此时 pending 将
+                            // 永远无人消费，幽灵条目留在会话里继续做种/占位。
+                            // 消费掉自己刚写的 pending，走正常删除。
+                            if bt.cached_handle(task_id).await.is_some()
+                                && let Some(df) = bt.take_pending_delete(task_id).await
+                                && let Err(error) = bt.delete_task(task_id, df).await
+                            {
+                                crate::logger::report_error(
+                                    "download-manager",
+                                    "delete late BT handle",
+                                    &error,
+                                );
+                                self.drain_queue().await;
+                                return;
+                            }
                         }
-                    };
-                    if !handle_found {
-                        // Handle not in map: the task is still in the
-                        // add_torrent phase (e.g. magnet DHT resolution)
-                        // or a reseed's local-data check is in flight.
-                        // Register a pending delete so the detached
-                        // add_torrent closure / reseed closure cleans up the
-                        // librqbit session entry (and files) once it resolves.
-                        bt.register_pending_delete(task_id, delete_files).await;
-                        // 二次检查：上面 miss 与 pending 写入之间存在 await
-                        // 窗口，句柄可能恰好在此期间落位（且对方闭包的
-                        // pending 检查已经跑完拿了个空）——此时 pending 将
-                        // 永远无人消费，幽灵条目留在会话里继续做种/占位。
-                        // 消费掉自己刚写的 pending，走正常删除。
-                        if bt.cached_handle(task_id).await.is_some()
-                            && let Some(df) = bt.take_pending_delete(task_id).await
-                            && let Err(error) = bt.delete_task(task_id, df).await
-                        {
-                            crate::logger::report_error(
-                                "download-manager",
-                                "delete late BT handle",
-                                &error,
-                            );
-                            self.drain_queue().await;
-                            return;
-                        }
+                    } else {
+                        // BT 会话未创建（本次启动未跑过 BT 任务）：按路径直接
+                        // 删 parts 边车（有会话时由 bt.delete_task 一并清理）。
+                        crate::bt_partfile::remove_sidecar(&crate::bt_partfile::sidecar_path(
+                            &self.app_data_dir,
+                            task_id,
+                        ));
                     }
-                } else {
-                    // BT 会话未创建（本次启动未跑过 BT 任务）：按路径直接
-                    // 删 parts 边车（有会话时由 bt.delete_task 一并清理）。
-                    crate::bt_partfile::remove_sidecar(&crate::bt_partfile::sidecar_path(
-                        &self.app_data_dir,
-                        task_id,
-                    ));
                 }
                 // Fallback filesystem cleanup: covers the cross-session case
                 // where the app restarted after completion (handle not in
@@ -10364,28 +10579,31 @@ impl DownloadManager {
                     }
                 }
 
-                // Always remove the task-scoped staging directory regardless
-                // of delete_files: if the download never finished, the staging
-                // dir contains partial data that should be cleaned up when the
-                // task is deleted.  If it already finished and was moved to the
-                // final path, the staging dir should be empty (or already gone).
-                let stage_dir = bt_downloader::bt_stage_dir(&t.save_dir, task_id);
-                if stage_dir.exists() {
-                    log_info!(
-                        "[manager] delete_task {}: removing staging dir {}",
-                        task_id,
-                        stage_dir.display()
-                    );
-                    if let Err(error) = tokio::fs::remove_dir_all(&stage_dir).await
-                        && error.kind() != std::io::ErrorKind::NotFound
-                    {
-                        crate::logger::report_warning(
-                            "download-manager",
-                            "remove task files",
-                            &error,
+                #[cfg(feature = "bt")]
+                {
+                    // Always remove the task-scoped staging directory regardless
+                    // of delete_files: if the download never finished, the staging
+                    // dir contains partial data that should be cleaned up when the
+                    // task is deleted.  If it already finished and was moved to the
+                    // final path, the staging dir should be empty (or already gone).
+                    let stage_dir = bt_downloader::bt_stage_dir(&t.save_dir, task_id);
+                    if stage_dir.exists() {
+                        log_info!(
+                            "[manager] delete_task {}: removing staging dir {}",
+                            task_id,
+                            stage_dir.display()
                         );
-                        if cleanup_error.is_none() {
-                            cleanup_error = Some(error.into());
+                        if let Err(error) = tokio::fs::remove_dir_all(&stage_dir).await
+                            && error.kind() != std::io::ErrorKind::NotFound
+                        {
+                            crate::logger::report_warning(
+                                "download-manager",
+                                "remove task files",
+                                &error,
+                            );
+                            if cleanup_error.is_none() {
+                                cleanup_error = Some(error.into());
+                            }
                         }
                     }
                 }
@@ -10549,6 +10767,7 @@ impl DownloadManager {
         self.drain_queue().await;
         self.sync_queue_occupancy();
         self.maybe_wal_checkpoint().await;
+        #[cfg(feature = "bt")]
         self.maybe_release_bt_session().await;
     }
 
@@ -10588,9 +10807,11 @@ impl DownloadManager {
         self.broadcast_queue_positions();
 
         let file_permits = Arc::new(Semaphore::new(DELETE_FILE_CONCURRENCY));
+        #[cfg(feature = "bt")]
         let app_data_dir: Arc<str> = Arc::from(self.app_data_dir.as_str());
         let mut workers = Vec::with_capacity(task_ids.len());
         for task_id in task_ids {
+            hls_downloader::request_discard(task_id);
             let handle = self
                 .active_tasks
                 .remove(task_id.as_str())
@@ -10616,7 +10837,9 @@ impl DownloadManager {
                 task_id: task_id.clone(),
                 handle,
                 files,
+                #[cfg(feature = "bt")]
                 bt_session: self.bt_session.clone(),
+                #[cfg(feature = "bt")]
                 app_data_dir: Arc::clone(&app_data_dir),
                 file_permits: Arc::clone(&file_permits),
             };
@@ -10626,7 +10849,9 @@ impl DownloadManager {
         let mut deleted = Vec::with_capacity(workers.len());
         let mut failed = 0;
         for (task_id, worker) in workers {
-            match worker.await {
+            let joined = worker.await;
+            hls_downloader::clear_discard(task_id);
+            match joined {
                 Ok(Ok(())) => deleted.push(task_id.clone()),
                 Ok(Err(error)) => {
                     crate::logger::report_error(
@@ -10711,6 +10936,7 @@ impl DownloadManager {
         self.drain_queue().await;
         self.sync_queue_occupancy();
         self.maybe_wal_checkpoint().await;
+        #[cfg(feature = "bt")]
         self.maybe_release_bt_session().await;
     }
 
@@ -10844,6 +11070,7 @@ impl DownloadManager {
     ///
     /// 恢复后若限制未调整，下一次求值 tick 会再次停止——先调高全局或任务级
     /// 限制才有意义。
+    #[cfg(feature = "bt")]
     async fn try_resume_seeding(&mut self, task_id: &str, task: &TaskInfo) -> bool {
         if task.status != 3 || !(2..=7).contains(&task.seeding_status) {
             return false;
@@ -10969,6 +11196,7 @@ impl DownloadManager {
     /// 注册为做种者或排队。初检在 BT runtime 上异步执行，不阻塞 actor；
     /// 期间任务显示为排队做种（附校验说明），失败回退停止态并附原因。
     /// 中途崩溃残留的排队态由下次启动的 `reset_stale_seeding` 兜底。
+    #[cfg(feature = "bt")]
     async fn spawn_reseed_from_disk(&self, bt: Arc<SharedBtSession>, task: &TaskInfo) {
         let stopped_status = task.seeding_status;
         let stopped_message = task.seeding_message.clone();
@@ -11211,6 +11439,7 @@ impl DownloadManager {
         }
 
         // 已完成种子的「恢复」是重新做种，绝不能重新进下载流水线。
+        #[cfg(feature = "bt")]
         if self.try_resume_seeding(task_id, &task_row).await {
             return false;
         }
@@ -11304,6 +11533,7 @@ impl DownloadManager {
         // 做种/排队做种的任务（status=3）既不在 pending_queue 也不在
         // active_tasks，单独收集，逐个走 pause_task_silent 的做种分支
         // （停止做种 → UserStopped）。
+        #[cfg(feature = "bt")]
         let seeding: Vec<String> = if let Some(ref bt) = self.bt_session {
             bt.seeding_manager()
                 .all_task_ids()
@@ -11314,6 +11544,8 @@ impl DownloadManager {
         } else {
             Vec::new()
         };
+        #[cfg(not(feature = "bt"))]
+        let seeding: Vec<String> = Vec::new();
         for tid in &seeding {
             self.pause_task_silent(tid).await;
         }
@@ -11383,6 +11615,7 @@ impl DownloadManager {
     /// 取消所有在途任务并等待下载 task 与 BT/DHT 持久化退出。
     pub async fn shutdown(&mut self) {
         // 做种时长平时只在状态迁移/顺带写/30 分钟兜底时落库，正常关机在此结算。
+        #[cfg(feature = "bt")]
         self.flush_seed_times().await;
         let mut handles = Vec::new();
         for (_task_id, entry) in self.active_tasks.drain() {
@@ -11400,6 +11633,7 @@ impl DownloadManager {
                 tracing::debug!("download shutdown deadline reached; worker aborted");
             }
         }
+        #[cfg(feature = "bt")]
         if let Some(bt) = self.bt_session.take()
             && let Err(error) = tokio::task::spawn_blocking(move || match Arc::try_unwrap(bt) {
                 Ok(owned) => owned.shutdown(),
@@ -11428,6 +11662,7 @@ impl Drop for DownloadManager {
         // `SharedBtSession::shutdown()` calls `runtime.block_on()`, which
         // panics if called from within a tokio runtime context.  Spawning a
         // std thread guarantees we are outside any runtime.
+        #[cfg(feature = "bt")]
         if let Some(bt) = self.bt_session.take() {
             std::thread::spawn(move || match Arc::try_unwrap(bt) {
                 Ok(owned) => owned.shutdown(),
@@ -12751,6 +12986,7 @@ const SPEED_DECAY_FACTOR: f64 = 0.5;
 const MIN_DART_INTERVAL_MS: u128 = 500;
 
 /// 供 BT runtime 上的做种恢复任务发进度事件（读最新行，status 恒 3）。
+#[cfg(feature = "bt")]
 async fn emit_seeding_progress(
     db: &Db,
     sink: &Arc<dyn EventSink>,
@@ -13267,6 +13503,7 @@ mod tests {
     use super::*;
     use crate::file_exists::OverwritePolicy;
 
+    #[cfg(feature = "bt")]
     #[test]
     fn webhook_provisional_file_name_follows_source_protocol() {
         assert_eq!(
@@ -14205,6 +14442,7 @@ mod tests {
                 .expect("advance task status");
         }
     }
+    #[cfg(feature = "bt")]
     #[tokio::test]
     async fn bt_disabled_setting_rejects_task_creation_and_session() {
         let db = Db::connect("sqlite::memory:")
@@ -14332,8 +14570,159 @@ mod tests {
         );
     }
 
+    /// 编译期没有 BT 后端（`--no-default-features`，如 iOS 商店构建）：即使配置显式
+    /// `enabled: true`，magnet / 种子字节任务也必须被明确拒绝且不落库，会话初始化返回
+    /// 同一通用文案；HTTP 任务不受影响。
+    #[cfg(not(feature = "bt"))]
+    #[tokio::test]
+    async fn without_bt_backend_rejects_magnet_and_torrent_tasks_even_if_enabled() {
+        const MAGNET: &str = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=t";
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let temp_dir = std::env::temp_dir();
+        let mut mgr = DownloadManager::new(
+            db,
+            DownloadManagerConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: temp_dir.to_string_lossy().into_owned(),
+                app_data_dir: temp_dir.to_string_lossy().into_owned(),
+                data_dir: temp_dir.clone(),
+                bt_config: BtConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                proxy_config: ProxyConfig::default(),
+                user_agent: String::new(),
+            },
+            Arc::new(RecordingSink::new()),
+            Arc::new(crate::NoopSelection),
+        )
+        .expect("construct manager");
+
+        // 配置声称启用也不能让一个不存在的后端“生效”（构造与热更新两条入口）。
+        assert!(!mgr.bt_config.enabled, "构造入口必须归一化为禁用");
+        mgr.set_bt_config(BtConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        assert!(!mgr.bt_config.enabled, "热更新入口必须归一化为禁用");
+
+        let err = mgr
+            .ensure_bt_session()
+            .await
+            .expect_err("no BT backend: session init must fail");
+        assert_eq!(err.to_string(), UNSUPPORTED_PROTOCOL_MESSAGE);
+
+        assert!(mgr.rejects_new_bt_task(MAGNET, &[]));
+        assert!(mgr.rejects_new_bt_task("", &[1, 2, 3]));
+        assert!(!mgr.rejects_new_bt_task("https://example.com/f.zip", &[]));
+        assert_eq!(
+            CreateRejection::BtDisabled.to_string(),
+            UNSUPPORTED_PROTOCOL_MESSAGE
+        );
+
+        let magnet = NewTaskSpec {
+            url: MAGNET.to_string(),
+            save_dir: temp_dir.to_string_lossy().into_owned(),
+            start_paused: true,
+            ..Default::default()
+        };
+        assert!(
+            mgr.create_task(magnet).await.is_none(),
+            "magnet 任务必须被拒绝"
+        );
+        let torrent_bytes = NewTaskSpec {
+            url: String::new(),
+            save_dir: temp_dir.to_string_lossy().into_owned(),
+            torrent_file_bytes: vec![1, 2, 3],
+            ..Default::default()
+        };
+        assert!(
+            mgr.create_task(torrent_bytes).await.is_none(),
+            "种子字节任务必须被拒绝"
+        );
+        assert!(
+            mgr.db
+                .load_all_tasks()
+                .await
+                .expect("load tasks")
+                .is_empty(),
+            "被拒绝的 BT 任务不得落库"
+        );
+
+        let http = NewTaskSpec {
+            url: "https://example.com/file.zip".to_string(),
+            save_dir: temp_dir.to_string_lossy().into_owned(),
+            start_paused: true,
+            ..Default::default()
+        };
+        assert!(
+            mgr.create_task(http).await.is_some(),
+            "HTTP 任务不受 BT 后端缺失影响"
+        );
+    }
+
+    /// 编译期没有 eD2K 后端：ed2k:// 链接（含 thunder 封装）预检命中、建任务被明确
+    /// 拒绝且不落库，其余协议不受影响。
+    #[cfg(not(feature = "ed2k"))]
+    #[tokio::test]
+    async fn without_ed2k_backend_rejects_ed2k_tasks() {
+        const ED2K: &str = "ed2k://|file|a.bin|1024|0123456789ABCDEF0123456789ABCDEF|/";
+        assert!(rejects_unsupported_protocol(ED2K));
+        assert!(rejects_unsupported_protocol("  ED2K://|file|a|1|0|/"));
+        assert!(!rejects_unsupported_protocol("https://example.com/a.bin"));
+        assert!(!rejects_unsupported_protocol(
+            "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        ));
+        assert_eq!(
+            CreateRejection::UnsupportedProtocol.to_string(),
+            UNSUPPORTED_PROTOCOL_MESSAGE
+        );
+
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let temp_dir = std::env::temp_dir();
+        let mut mgr = DownloadManager::new(
+            db,
+            DownloadManagerConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: temp_dir.to_string_lossy().into_owned(),
+                app_data_dir: temp_dir.to_string_lossy().into_owned(),
+                data_dir: temp_dir.clone(),
+                bt_config: BtConfig::default(),
+                proxy_config: ProxyConfig::default(),
+                user_agent: String::new(),
+            },
+            Arc::new(RecordingSink::new()),
+            Arc::new(crate::NoopSelection),
+        )
+        .expect("construct manager");
+        let ed2k = NewTaskSpec {
+            url: ED2K.to_string(),
+            save_dir: temp_dir.to_string_lossy().into_owned(),
+            start_paused: true,
+            ..Default::default()
+        };
+        assert!(mgr.create_task(ed2k).await.is_none(), "ed2k 任务必须被拒绝");
+        assert!(
+            mgr.db
+                .load_all_tasks()
+                .await
+                .expect("load tasks")
+                .is_empty(),
+            "被拒绝的 ed2k 任务不得落库"
+        );
+    }
+
     /// BT 禁用后排队 / 恢复路径：BT 任务不得停在「等待/下载中」假象，也不得被置失败；
     /// 预检接口须能识别被拒的 BT 任务，供 daemon 向客户端回报原因。
+    #[cfg(feature = "bt")]
     #[tokio::test]
     async fn bt_disabled_parks_queued_and_resumed_bt_tasks_and_reports_rejections() {
         const MAGNET: &str = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=t";
@@ -14488,6 +14877,7 @@ mod tests {
 
     /// 禁用 BT 必须释放已建立的真实会话（关闭监听、停止做种），而不只是拒绝新任务；
     /// 重新创建需等再次启用。
+    #[cfg(feature = "bt")]
     #[tokio::test]
     async fn disabling_bt_releases_live_session_and_blocks_recreation() {
         let db = Db::connect("sqlite::memory:")
@@ -14867,6 +15257,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "bt")]
     #[tokio::test]
     async fn bt_progress_database_error_publishes_failed_task() {
         let (dir, db, injector) = sqlite_fault_fixture("bt_progress_failure").await;
@@ -14902,6 +15293,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "bt")]
     #[tokio::test]
     async fn bt_outer_error_preserves_existing_terminal_and_duplicate_state() {
         let db = Db::connect("sqlite::memory:")
@@ -17601,6 +17993,7 @@ mod tests {
     }
 
     /// 做种状态帧在 actor 之外先落库、再读库发出，同样不得抢在在途整表快照之前。
+    #[cfg(feature = "bt")]
     #[tokio::test]
     async fn seeding_progress_waits_for_in_flight_snapshot() {
         let db = Db::connect("sqlite::memory:")
@@ -17780,6 +18173,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "bt")]
     #[test]
     fn effective_upload_bps_prefers_task_then_queue_then_unlimited() {
         // 任务级 > 0 直接生效，无视队列级。
@@ -17910,8 +18304,10 @@ mod tests {
     // decide_bt_session_release — 暂停任务保活宽限
     // -----------------------------------------------------------------------
 
+    #[cfg(feature = "bt")]
     const GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+    #[cfg(feature = "bt")]
     fn paused_only() -> BtSessionHolds {
         BtSessionHolds {
             paused_incomplete: true,
@@ -17919,6 +18315,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "bt")]
     #[test]
     fn paused_only_session_is_kept_for_grace_then_released() {
         let t0 = std::time::Instant::now();
@@ -17959,6 +18356,7 @@ mod tests {
         assert_eq!(since, None);
     }
 
+    #[cfg(feature = "bt")]
     #[test]
     fn bt_activity_keeps_session_and_resets_grace() {
         let t0 = std::time::Instant::now();
@@ -18026,6 +18424,7 @@ mod tests {
         assert_eq!(since, Some(repaused));
     }
 
+    #[cfg(feature = "bt")]
     #[test]
     fn session_without_any_hold_is_released_immediately() {
         let t0 = std::time::Instant::now();

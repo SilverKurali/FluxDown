@@ -19,7 +19,12 @@ export const TIER_RANK: Record<RuleTier, number> = {
   builtin: 3,
 };
 
-export type RuleStage = "response" | "normalize" | "track" | "body" | "dom";
+/**
+ * - response：响应分类 / 忽略；normalize：URL 归一（去参、扩展名、镜像域名）；track：音视频轨判定；
+ * - body：API 响应 JSON 提取（emit 资源 / 声明清单）；dom：页面元素提取资源；
+ * - page：页面级提示（播放元素标题、浮钮排除）；request：下载请求补充的请求头。
+ */
+export type RuleStage = "response" | "normalize" | "track" | "body" | "dom" | "page" | "request";
 
 export interface RulePack {
   format: "fluxdown-sniff-pack";
@@ -114,7 +119,17 @@ export type RuleAction =
       fields: Record<string, string>;
       emit: EmitSpec;
     }
-  | { kind: "dom"; selector: string; attr: string; emit: EmitSpec };
+  | { kind: "dom"; selector: string; attr: string; emit: EmitSpec }
+  /** JSON 中 `path`（缺省为根）处是 DASH 结构（video[] / audio[] 带 baseUrl），按清单处理。 */
+  | { kind: "manifest"; path?: string }
+  /** 同一媒体的镜像域名组：组内域名上路径相同的文件视为同一文件（清单合并、播放档识别）。 */
+  | { kind: "mirror"; hosts: string[] }
+  /** 播放元素的标题来源：取离该元素最近的匹配节点（`attr` 缺省取文本）。用于候选名与下载文件名。 */
+  | { kind: "title"; selector: string; attr?: string }
+  /** 匹配 `selector`（或位于其中）的媒体元素不显示浮钮（背景 / 广告 / 预览视频）。 */
+  | { kind: "player"; selector: string; float: "hide" }
+  /** 下载这些 URL 时补充的请求头（Referer / Origin / UA 等；凭据类头不允许）。 */
+  | { kind: "headers"; set: Record<string, string> };
 
 export interface EmitSpec {
   mode: "resource" | "preempt";
@@ -147,8 +162,21 @@ export type RuleOverrides = Record<
 /** 各 stage 允许的 action.kind。 */
 export const STAGE_ACTIONS: Record<RuleStage, RuleAction["kind"][]> = {
   response: ["resource", "ignore"],
-  normalize: ["strip-params", "filename"],
+  normalize: ["strip-params", "filename", "mirror"],
   track: ["track"],
-  body: ["extract"],
+  body: ["extract", "manifest"],
   dom: ["dom"],
+  page: ["title", "player"],
+  request: ["headers"],
 };
+
+/** headers 动作禁止设置的请求头（凭据与连接控制由浏览器 / 引擎负责）。 */
+export const FORBIDDEN_RULE_HEADERS: ReadonlySet<string> = new Set([
+  "cookie",
+  "authorization",
+  "proxy-authorization",
+  "host",
+  "content-length",
+  "range",
+  "connection",
+]);

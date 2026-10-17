@@ -227,6 +227,34 @@ pub(crate) fn confirm_delete(
     });
 }
 
+/// 让另一台在线设备下线（无确认：只是释放在线名额，设备仍受信任，可自行重连）；失败弹出错误通知。
+pub(crate) fn disconnect_device(
+    host: &Entity<AccountHost>,
+    device: &CloudDevice,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let future = host.update(cx, |host, _| host.disconnect_device(&device.id));
+    let host = host.clone();
+    window
+        .spawn(cx, async move |cx| {
+            let result = future.await;
+            let Ok(()) = cx.update(|window, cx| {
+                if let Err(error) = result {
+                    let message = error_text(
+                        host.read(cx).translator().read(cx),
+                        &error,
+                        ErrorContext::General,
+                    );
+                    window.push_notification(Notification::error(message), cx);
+                }
+            }) else {
+                return;
+            };
+        })
+        .detach();
+}
+
 /// 解除局域网配对确认。
 pub(crate) fn confirm_unpair(
     host: &Entity<AccountHost>,

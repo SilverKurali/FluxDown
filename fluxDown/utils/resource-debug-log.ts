@@ -15,13 +15,27 @@ import type {
   MediaCandidateVariant,
 } from "./media-candidates";
 import { countMediaCandidateRows } from "./media-candidates";
+import type { HlsPlaylistEntry } from "./hls-playlist";
 import type { DetectedResource } from "./resource-types";
+import type { ElementState } from "@/background/protocol";
 export type DebugUrlKey = (url: string) => string;
+
+/** 候选与播放元素的关联（来自视图模型）。 */
+export interface DebugCandidateBinding {
+  elementKey: string | null;
+  binding: "exact" | "temporal" | "inferred" | "none";
+  playingVariantId: string | null;
+}
 
 export interface ResourceDebugLogOptions {
   resources: DetectedResource[];
   manifests?: DashManifestEntry[];
+  hlsPlaylists?: HlsPlaylistEntry[];
   candidates: MediaCandidate[];
+  /** 页面媒体元素状态（含 MSE 归因证据）；浮钮与「当前播放」分组都依赖它。 */
+  elements?: ElementState[];
+  /** 候选 id → 关联到的元素；缺省视为未关联。 */
+  bindings?: ReadonlyMap<string, DebugCandidateBinding>;
   tabId?: number;
   pageUrl?: string;
   pageTitle?: string;
@@ -150,6 +164,7 @@ function debugVariant(variant: MediaCandidateVariant, key: DebugUrlKey) {
     codec: variant.codec,
     fileSize: variant.fileSize,
     resourceId: variant.resourceId,
+    alternateUrls: (variant.alternateUrls ?? []).map(redactUrl),
   };
 }
 
@@ -193,7 +208,24 @@ export interface ResourceDebugLog {
     isAttachment: boolean | undefined;
     auth: { hasCookies: boolean; headerNames: string[] };
   }>;
-  manifests: Array<{ url: string; canonicalUrl: string; video: DebugTrack[]; audio: DebugTrack[] }>;
+  manifests: Array<{ url: string; canonicalUrl: string; carried: boolean; video: DebugTrack[]; audio: DebugTrack[] }>;
+  hlsPlaylists: Array<{ url: string; children: string[]; segmentDirs: string[] }>;
+  elements: Array<{
+    key: string;
+    frameId: number;
+    tag: ElementState["tag"];
+    playing: boolean;
+    visibleRatio: number;
+    rect: ElementState["rect"];
+    videoHeight: number;
+    currentSrc: string;
+    sourceBuffers: Array<{
+      kind: string;
+      mime: string;
+      exact: string[];
+      temporal: Array<{ url: string; count: number }>;
+    }>;
+  }>;
   candidates: Array<{
     id: string;
     title: string;
@@ -203,6 +235,7 @@ export interface ResourceDebugLog {
     downloadable: boolean;
     fragmentCount: number;
     rawResourceIds: string[];
+    binding: DebugCandidateBinding;
     variants: DebugVariant[];
   }>;
 }
@@ -274,8 +307,30 @@ export function buildResourceDebugLog(options: ResourceDebugLogOptions): Resourc
     manifests: manifests.map((entry) => ({
       url: redactUrl(entry.url),
       canonicalUrl: canonicalOf(options.key, entry.url),
+      carried: entry.carried === true,
       video: entry.manifest.video.map((track) => debugTrack(track, options.key)),
       audio: entry.manifest.audio.map((track) => debugTrack(track, options.key)),
+    })),
+    hlsPlaylists: (options.hlsPlaylists || []).map((entry) => ({
+      url: redactUrl(entry.url),
+      children: entry.playlist.children.map(redactUrl),
+      segmentDirs: entry.playlist.segmentDirs.map(redactUrl),
+    })),
+    elements: (options.elements || []).map((element) => ({
+      key: element.key,
+      frameId: element.frameId,
+      tag: element.tag,
+      playing: element.playing,
+      visibleRatio: element.visibleRatio,
+      rect: element.rect,
+      videoHeight: element.videoHeight,
+      currentSrc: redactUrl(element.currentSrc),
+      sourceBuffers: element.bindings.map((sb) => ({
+        kind: sb.kind,
+        mime: sb.mime,
+        exact: sb.exact.map(redactUrl),
+        temporal: sb.temporal.map((t) => ({ url: redactUrl(t.url), count: t.count })),
+      })),
     })),
     candidates: options.candidates.map((candidate) => ({
       id: candidate.id,
@@ -286,6 +341,7 @@ export function buildResourceDebugLog(options: ResourceDebugLogOptions): Resourc
       downloadable: candidate.downloadable,
       fragmentCount: candidate.fragmentCount,
       rawResourceIds: candidate.rawResourceIds,
+      binding: options.bindings?.get(candidate.id) ?? { elementKey: null, binding: "none", playingVariantId: null },
       variants: candidate.variants.map((variant) => debugVariant(variant, options.key)),
     })),
   };

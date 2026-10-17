@@ -6,10 +6,10 @@
 import { browser } from "wxt/browser";
 import type { Browser } from "wxt/browser";
 
-// 请求头缓存（Cookie / Authorization）
+// 请求头缓存（Cookie / Authorization）；兼作「该 URL 确有网络请求」的证据（见 sawNetworkRequest）。
 export const requestHeaderCache = new Map<
   string,
-  { cookies: string; headers: Record<string, string>; ts: number }
+  { cookies: string; headers: Record<string, string>; ts: number; navigationPreload: boolean }
 >();
 
 export type CapturedBody =
@@ -130,15 +130,28 @@ function onSendHeadersHandler(
   if (!details.requestHeaders) return;
   const headers: Record<string, string> = {};
   let cookies = "";
+  let navigationPreload = false;
   for (const h of details.requestHeaders) {
     if (h.name && h.value) {
       headers[h.name] = h.value;
-      if (h.name.toLowerCase() === "cookie") {
+      const name = h.name.toLowerCase();
+      if (name === "cookie") {
         cookies = h.value;
+      } else if (name === "service-worker-navigation-preload") {
+        navigationPreload = true;
       }
     }
   }
-  requestHeaderCache.set(details.url, { cookies, headers, ts: Date.now() });
+  requestHeaderCache.set(details.url, { cookies, headers, ts: Date.now(), navigationPreload });
+}
+
+/**
+ * 该 URL 近 60 s 内是否真的发往过网络（含页面 SW 直通 `fetch(event.request)`）。
+ * SW 导航预载不算：SW 可以弃用预载结果、在浏览器内自行合成响应。
+ */
+export function sawNetworkRequest(url: string): boolean {
+  const entry = requestHeaderCache.get(url);
+  return entry !== undefined && !entry.navigationPreload;
 }
 
 // === 认证信息提取辅助 ===
@@ -241,12 +254,18 @@ export function installRequestCache(): void {
     }
   }, 30_000);
 
+  // 只缓存可能产生下载 / 嗅探资源的请求类型：图片、脚本、样式、字体等占页面请求的绝大多数，
+  // 带 extraHeaders 的监听会让浏览器为每个命中的请求多走一次请求头回调，且下载从不经由这些类型。
+  const sendHeadersFilter: Browser.webRequest.RequestFilter = {
+    urls: ["<all_urls>"],
+    types: ["main_frame", "sub_frame", "xmlhttprequest", "media", "object", "other"],
+  };
   const sendHeadersOpts: Browser.webRequest.OnSendHeadersOptions[] | ("requestHeaders" | "extraHeaders")[] = ["requestHeaders"];
   try {
     // 先尝试带 extraHeaders（Chrome MV3），失败则降级（Firefox）
     browser.webRequest.onSendHeaders.addListener(
       onSendHeadersHandler,
-      { urls: ["<all_urls>"] },
+      sendHeadersFilter,
       [...sendHeadersOpts, "extraHeaders"] as ("requestHeaders" | "extraHeaders")[],
     );
     console.log(
@@ -256,7 +275,7 @@ export function installRequestCache(): void {
     try {
       browser.webRequest.onSendHeaders.addListener(
         onSendHeadersHandler,
-        { urls: ["<all_urls>"] },
+        sendHeadersFilter,
         sendHeadersOpts,
       );
       console.log(

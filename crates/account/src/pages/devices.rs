@@ -21,7 +21,7 @@ use gpui_component::{
 
 use crate::device_list::{platform_label_key, summarize};
 use crate::dialogs::device::{
-    confirm_delete, confirm_unpair, open_detail, open_manage_all, open_rename,
+    confirm_delete, confirm_unpair, disconnect_device, open_detail, open_manage_all, open_rename,
 };
 use crate::host::AccountHost;
 use crate::view::AccountView;
@@ -116,6 +116,8 @@ fn render_cloud(
     let disabled = state.disabled;
     let refreshing = state.refreshing;
     let total = state.devices.len();
+    let waiting = controller.online_limit_waiting();
+    let max_online = controller.max_online_devices();
 
     let rows: Vec<_> = visible
         .iter()
@@ -176,7 +178,12 @@ fn render_cloud(
             Some(t(translator, "cloudConnectionStatusHint")),
             cx,
         ))
-        .children(error_key.map(|key| ui::group_heading(t(translator, key), None, cx)))
+        .children(
+            error_key
+                .filter(|_| !waiting)
+                .map(|key| ui::group_heading(t(translator, key), None, cx)),
+        )
+        .children(waiting.then(|| online_limit_notice(translator, tokens, state, max_online, cx)))
         .child(card(cx).w_full().map(|card| {
             if rows.is_empty() {
                 card.p(tokens.spacing.lg).flex().justify_center().child(
@@ -218,6 +225,78 @@ fn render_cloud(
                     })
             }
         }))
+}
+
+/// 在线名额已满、本机等待时的提示：说明上限，并列出占用名额的其他在线设备，可逐个让其下线。
+fn online_limit_notice(
+    translator: &Translator,
+    tokens: &SemanticThemeTokens,
+    state: &DevicesState<'_>,
+    max_online: Option<u64>,
+    cx: &App,
+) -> impl IntoElement {
+    let text = match max_online {
+        Some(max) => t_with(
+            translator,
+            "cloudOnlineLimitNotice",
+            &[("max", &max.to_string())],
+        ),
+        None => t(translator, "cloudOnlineLimitNoticeNoMax"),
+    };
+    let rows: Vec<_> = state
+        .devices
+        .iter()
+        .filter(|device| device.is_online && !device.is_current)
+        .map(|device| {
+            let host = state.host.clone();
+            let target = device.clone();
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap(tokens.spacing.md)
+                .px(tokens.spacing.md)
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(tokens.typography.sm.size)
+                        .line_height(tokens.typography.sm.line_height)
+                        .text_color(tokens.colors.foreground)
+                        .truncate()
+                        .child(device.name.clone()),
+                )
+                .child(
+                    button(
+                        SharedString::from(format!(
+                            "account-online-limit-disconnect-{}",
+                            device.id
+                        )),
+                        t(translator, "accountDeviceDisconnectAction"),
+                        ButtonVariant::Secondary,
+                        cx,
+                    )
+                    .on_click(move |_, window, cx| {
+                        disconnect_device(&host, &target, window, cx);
+                    }),
+                )
+                .into_any_element()
+        })
+        .collect();
+    v_flex()
+        .w_full()
+        .gap(tokens.spacing.sm)
+        .child(ui::notice(ui::NoticeTone::Warning, text, cx))
+        .when(!rows.is_empty(), |this| {
+            this.child(
+                div()
+                    .px(tokens.spacing.md)
+                    .text_size(tokens.typography.xs.size)
+                    .line_height(tokens.typography.xs.line_height)
+                    .text_color(tokens.colors.muted_foreground)
+                    .child(t(translator, "cloudOnlineLimitListTitle")),
+            )
+            .children(rows)
+        })
 }
 
 fn render_linked(
@@ -347,9 +426,15 @@ pub(crate) fn device_row(
     let element_id = |kind: &'static str| {
         gpui::ElementId::from(SharedString::from(format!("{scope}-{kind}-{id}")))
     };
-    let (detail_host, rename_host, delete_host) = (host.clone(), host.clone(), host.clone());
-    let (detail_device, rename_device, delete_device) =
-        (device.clone(), device.clone(), device.clone());
+    let (detail_host, rename_host, delete_host, disconnect_host) =
+        (host.clone(), host.clone(), host.clone(), host.clone());
+    let (detail_device, rename_device, delete_device, disconnect_target) = (
+        device.clone(),
+        device.clone(),
+        device.clone(),
+        device.clone(),
+    );
+    let can_disconnect = host.read(cx).controller.can_disconnect_device(device);
     let status = t(
         translator,
         host.read(cx).controller.device_presence_key(device),
@@ -425,6 +510,23 @@ pub(crate) fn device_row(
                     h_flex()
                         .flex_none()
                         .gap(tokens.spacing.xs)
+                        .when(can_disconnect, |this| {
+                            this.child(
+                                Button::new(element_id("disconnect"))
+                                    .ghost()
+                                    .control_icon(cx)
+                                    .icon(FluxIcon::Power)
+                                    .tooltip(t(translator, "accountDeviceDisconnectAction"))
+                                    .on_click(move |_, window, cx| {
+                                        disconnect_device(
+                                            &disconnect_host,
+                                            &disconnect_target,
+                                            window,
+                                            cx,
+                                        );
+                                    }),
+                            )
+                        })
                         .child(
                             Button::new(element_id("detail"))
                                 .ghost()

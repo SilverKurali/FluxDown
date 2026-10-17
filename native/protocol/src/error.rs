@@ -85,8 +85,8 @@ pub enum ErrorReason {
     MailNotConfigured,
     /// FluxCloud：账号设备数已达套餐上限。
     DeviceLimit,
-    /// FluxCloud：参与配置同步的设备数已达套餐上限。
-    SyncDeviceLimit,
+    /// FluxCloud：账号同时在线设备数已达套餐上限（本设备保持登录，可在线列表中手动下线其他设备）。
+    OnlineDeviceLimit,
     /// FluxCloud：本设备不在账号的受信任设备中（已被移除 / 被替换）。
     DeviceUntrusted,
     /// FluxCloud：登录会话已失效（被撤销 / 刷新令牌过期）。
@@ -145,6 +145,28 @@ pub enum ErrorReason {
     NotifyDisabled,
     /// 云端推送：渠道配置无效（Device Key / 主题 / 机器人地址不合法，或该种类暂不可用）。
     NotifyTargetInvalid,
+    /// 套餐购买：云端未开放支付。
+    PaymentDisabled,
+    /// 套餐购买：支付网关建单失败（可稍后重试）。
+    PaymentGatewayFailed,
+    /// 套餐购买：目标套餐已下架或不可购买。
+    PlanNotPurchasable,
+    /// 套餐购买：已持有该套餐。
+    PlanAlreadyOwned,
+    /// 套餐购买：已付金额不低于目标套餐价格（买断制差价升级不成立）。
+    PlanNotUpgrade,
+    /// 套餐购买：已持有同档或更高档套餐（买断制只升不降）。
+    PlanTierNotHigher,
+    /// 推介：邀请码无效（不存在 / 功能未开启）。
+    ReferralCodeInvalid,
+    /// 推介：不能使用自己的邀请码。
+    ReferralSelfUse,
+    /// 推介：本账号已使用过邀请码（每人终生一次）。
+    ReferralAlreadyUsed,
+    /// 推介：目标套餐不参与推介。
+    ReferralPlanExcluded,
+    /// 推介：自定义推荐码已被占用。
+    ReferralCodeTaken,
     /// 对端发送了本端不认识的原因。
     #[serde(other)]
     Unknown,

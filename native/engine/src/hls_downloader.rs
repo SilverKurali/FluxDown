@@ -21,6 +21,9 @@
 //! - Per-segment retry with exponential backoff
 //! - 变体 AUDIO 组带独立 URI(EXT-X-MEDIA)时并行下载音轨,收尾用 ffmpeg 流复制
 //!   与视频 mux;ffmpeg 不可用时只出视频并记录 warning 活动
+//! - 直播(播放列表无 EXT-X-ENDLIST):按 EXT-X-TARGETDURATION(1–10s)轮询播放列表,
+//!   按 media sequence 只追加新分片,播放列表出现 ENDLIST / 用户暂停或取消 / 播放列表
+//!   连续拉取失败时,以已录内容走与点播相同的收尾(remux / 音轨 mux)定稿为完成文件
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -276,6 +279,8 @@ pub enum M3u8Content {
         has_map: bool,
         /// 播放列表是否为直播/未结束(无 EXT-X-ENDLIST 且非 VOD 类型)。
         live: bool,
+        /// EXT-X-TARGETDURATION(秒),直播轮询间隔据此推算。
+        target_duration: u64,
     },
 }
 
@@ -617,6 +622,7 @@ fn parse_m3u8_bytes(base_url: &str, bytes: &[u8]) -> Result<M3u8Content, Downloa
                 media_sequence,
                 has_map,
                 live,
+                target_duration: media.target_duration,
             })
         }
     }
@@ -1395,13 +1401,14 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
                         media_sequence,
                         has_map,
                         live,
+                        target_duration,
                     } => (
                         segments,
                         media_sequence,
                         selected_uri,
                         has_map,
                         Some(chosen),
-                        live,
+                        live.then_some(target_duration),
                         audio_uri,
                     ),
                     M3u8Content::Master { .. } => {
@@ -1417,26 +1424,23 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
                 media_sequence,
                 has_map,
                 live,
+                target_duration,
             } => (
                 segments,
                 media_sequence,
                 p.url.clone(),
                 has_map,
                 None,
-                live,
+                live.then_some(target_duration),
                 None,
             ),
         };
 
-    if live {
-        return Err(DownloadError::Other(
-            "暂不支持直播或未结束的 HLS 流（播放列表缺少 EXT-X-ENDLIST）".to_string(),
-        ));
-    }
-
     // 独立音轨的播放列表在创建任何文件之前解析:拿不到音轨就是真实失败,不能
-    // 静默退化成无声输出。音轨与视频同为点播时长,直播音轨一并拒绝。
-    let audio_playlist: Option<(String, Vec<HlsSegment>, u64, bool)> = match audio_uri {
+    // 静默退化成无声输出。直播视频搭配直播音轨时二者同步录制;点播视频搭配直播
+    // 音轨无法对齐(按点播下载只会得到快照),直接失败;直播视频搭配点播音轨时
+    // 丢弃音轨并留下 warning 活动。
+    let audio_playlist: Option<AudioPlaylist> = match audio_uri {
         Some(uri) => match parse_m3u8(&p.client, &uri, &root_ctx, &p.cancel_token)
             .await
             .map_err(reject_not_hls)?
@@ -1444,17 +1448,32 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
             M3u8Content::Media {
                 segments: audio_segments,
                 media_sequence: audio_sequence,
-                has_map,
                 live: audio_live,
+                target_duration: audio_target_duration,
                 ..
-            } => {
-                if audio_live {
+            } => match (live.is_some(), audio_live) {
+                (false, true) => {
                     return Err(DownloadError::Other(
                         "HLS 独立音轨播放列表缺少 EXT-X-ENDLIST，无法下载".to_string(),
                     ));
                 }
-                Some((uri, audio_segments, audio_sequence, has_map))
-            }
+                (true, false) => {
+                    record_task_warning(
+                        &p.db,
+                        p.sink.as_ref(),
+                        &p.task_id,
+                        "直播流的独立音轨播放列表已有 EXT-X-ENDLIST，无法与直播视频同步录制；仅录制视频流，输出文件可能没有声音",
+                    )
+                    .await;
+                    None
+                }
+                _ => Some(AudioPlaylist {
+                    uri,
+                    segments: audio_segments,
+                    media_sequence: audio_sequence,
+                    live_target: audio_live.then_some(audio_target_duration),
+                }),
+            },
             M3u8Content::Master { .. } => {
                 return Err(DownloadError::Other(
                     "nested master playlist not supported".to_string(),
@@ -1530,24 +1549,47 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
 
     // 独立音轨的临时文件紧邻视频:`<stem>.audio.m4a.fdownloading`(与 DASH 音轨
     // sidecar 同名约定,任务删除时按同一规则清理)。
-    let audio_track: Option<AudioTrack> = audio_playlist.map(
-        |(playlist_url, audio_segments, audio_sequence, _)| AudioTrack {
-            tag: audio_track_tag(&playlist_url),
-            playlist_url,
-            segments: audio_segments,
-            media_sequence: audio_sequence,
-            temp_path: PathBuf::from(format!(
-                "{}{}",
-                build_audio_path(&dest_path).display(),
-                TEMP_EXT
-            )),
-            resume_key: audio_resume_key(&p.task_id),
-        },
-    );
+    let audio_track: Option<AudioTrack> = audio_playlist.map(|audio| AudioTrack {
+        tag: audio_track_tag(&audio.uri),
+        playlist_url: audio.uri,
+        segments: audio.segments,
+        media_sequence: audio.media_sequence,
+        live_target: audio.live_target,
+        temp_path: PathBuf::from(format!(
+            "{}{}",
+            build_audio_path(&dest_path).display(),
+            TEMP_EXT
+        )),
+        resume_key: audio_resume_key(&p.task_id),
+    });
     let audio_temp_path = audio_track.as_ref().map(|t| t.temp_path.clone());
 
     // Ensure parent directory exists
     output::ensure_parent(&temp_path).await?;
+
+    // 直播:没有总长度可言,从当前播放列表起持续录制,停止后按点播同一套收尾定稿。
+    if let Some(target_duration) = live {
+        return run_live_recording(
+            p,
+            LiveRecording {
+                segments,
+                media_sequence,
+                target_duration,
+                playlist_url: media_playlist_url,
+                is_fmp4,
+                variant_tag: chosen_variant.as_ref().map(VariantId::encode),
+                abandon_resume,
+                audio: audio_track,
+                ffmpeg,
+                temp_path,
+                dest_path,
+                actual_name,
+                save_dir,
+                resume_key: resume_seg_key,
+            },
+        )
+        .await;
+    }
 
     // --- HLS resume support ---
     // On resume, check if we have a saved segment index from a previous run.
@@ -1721,33 +1763,14 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     let reported_bytes = Arc::new(AtomicI64::new(downloaded_bytes));
     // 独立音轨已写入的字节数(含续传前缀),与视频字节一起汇总为任务进度。
     let audio_written = Arc::new(AtomicI64::new(0));
-    let sample_audio = Arc::clone(&audio_written);
-    let sample_tracker = tracker.clone();
-    let sample_bytes = Arc::clone(&reported_bytes);
-    let sample_tx = p.progress_tx.clone();
-    let sample_task = p.task_id.clone();
-    let sample_limit = concurrency as u32;
-    let mut sampler = AbortOnDrop(tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(200));
-        loop {
-            ticker.tick().await;
-            if sample_tx
-                .send(ProgressUpdate {
-                    task_id: sample_task.clone(),
-                    downloaded_bytes: sample_bytes.load(Ordering::Relaxed)
-                        + sample_audio.load(Ordering::Relaxed),
-                    total_bytes: 0,
-                    status: 1,
-                    runtime: Some(hls_runtime(&sample_task, &sample_tracker, sample_limit)),
-                    ..Default::default()
-                })
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    }));
+    let mut sampler = spawn_progress_sampler(
+        p.progress_tx.clone(),
+        p.task_id.clone(),
+        tracker.clone(),
+        Arc::clone(&reported_bytes),
+        Arc::clone(&audio_written),
+        concurrency as u32,
+    );
     let seg_ctx = HlsRequestCtx {
         cookies: &p.cookies,
         cookie_base_url: &media_playlist_url,
@@ -1821,7 +1844,7 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     // Channel 容量 == concurrency:未释放的许可数不超过它,结果入队从不阻塞。
     let (result_tx, mut result_rx) = mpsc::channel::<SegmentOutcome>(concurrency.max(1));
 
-    let jobs: Vec<SegmentJob> = segment_jobs(&segments, first_idx);
+    let jobs: Vec<SegmentJob> = segment_jobs(&segments, first_idx, media_sequence);
     let shared = Arc::new(SegmentShared {
         client: p.client.clone(),
         cookies: p.cookies.clone(),
@@ -1832,7 +1855,6 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
         cancel: p.cancel_token.clone(),
         task_id: p.task_id.clone(),
         key_cache: key_cache.clone(),
-        media_sequence,
         tracker: tracker.clone(),
         db: p.db.clone(),
         sink: p.sink.clone(),
@@ -2191,6 +2213,63 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     file.flush().await?;
     drop(file);
 
+    finalize_recording(
+        p,
+        FinalizeInput {
+            temp_path,
+            dest_path,
+            save_dir,
+            audio_temp_path,
+            ffmpeg,
+            actual_name,
+            resume_key: resume_seg_key,
+            is_fmp4,
+            downloaded_bytes,
+            audio_bytes,
+        },
+        &p.cancel_token,
+    )
+    .await
+}
+
+/// [`finalize_recording`] 的输入:录制阶段结束后落盘产物的全部事实。
+struct FinalizeInput {
+    temp_path: PathBuf,
+    dest_path: PathBuf,
+    save_dir: PathBuf,
+    audio_temp_path: Option<PathBuf>,
+    ffmpeg: Option<PathBuf>,
+    actual_name: String,
+    /// 视频轨续传检查点的 config 键,收尾成功后清理。
+    resume_key: String,
+    is_fmp4: bool,
+    downloaded_bytes: i64,
+    audio_bytes: i64,
+}
+
+/// 点播下载与直播录制共用的收尾:音轨 mux → 占名改名 → TS→MP4 remux,返回最终字节数。
+///
+/// 调用方必须已 flush 并关闭视频 temp 文件。`cancel` 只约束 ffmpeg mux / remux:
+/// 点播沿用任务令牌(暂停/取消时保留 temp 供续传);直播被用户停止时任务令牌已
+/// 取消,调用方传入独立令牌,使已录内容仍能定稿。
+async fn finalize_recording(
+    p: &DownloadParams,
+    input: FinalizeInput,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<i64, DownloadError> {
+    let FinalizeInput {
+        temp_path,
+        dest_path,
+        save_dir,
+        audio_temp_path,
+        ffmpeg,
+        actual_name,
+        resume_key: resume_seg_key,
+        is_fmp4,
+        downloaded_bytes,
+        audio_bytes,
+    } = input;
+
     // Save final progress
     let total_written = downloaded_bytes + audio_bytes;
     p.db.update_task_progress(&p.task_id, total_written).await?;
@@ -2208,6 +2287,7 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
             total_written,
             ffmpeg_bin,
             &resume_seg_key,
+            cancel,
         )
         .await
         {
@@ -2354,7 +2434,7 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
         &p.overwrite,
         is_fmp4,
         ffmpeg.as_deref(),
-        &p.cancel_token,
+        cancel,
     )
     .await
     {
@@ -2678,14 +2758,16 @@ async fn sibling_avoid(p: &DownloadParams) -> std::collections::HashSet<String> 
         .unwrap_or_default()
 }
 
-/// 从 `first_idx` 起为每个尚未落盘的段生成下载任务。
-fn segment_jobs(segments: &[HlsSegment], first_idx: usize) -> Vec<SegmentJob> {
+/// 从 `first_idx` 起为每个尚未落盘的段生成下载任务。`media_sequence` 是 `segments[0]`
+/// 的序号,各段据此得到自己的绝对序号(AES-128 无显式 IV 时用作 IV)。
+fn segment_jobs(segments: &[HlsSegment], first_idx: usize, media_sequence: u64) -> Vec<SegmentJob> {
     segments
         .iter()
         .enumerate()
         .skip(first_idx)
         .map(|(idx, segment)| SegmentJob {
             idx,
+            sequence: media_sequence.saturating_add(idx as u64),
             uri: segment.uri.clone(),
             byte_range: segment.byte_range,
             // Extract only the encryption fields needed to decrypt this segment.
@@ -2752,6 +2834,8 @@ async fn prefetch_init_segments(
 struct AudioTrack {
     segments: Vec<HlsSegment>,
     media_sequence: u64,
+    /// `Some(EXT-X-TARGETDURATION)` 表示该音轨是直播,与直播视频同步录制。
+    live_target: Option<u64>,
     playlist_url: String,
     temp_path: PathBuf,
     resume_key: String,
@@ -2920,13 +3004,12 @@ async fn run_audio_track(run: AudioRun) -> Result<i64, DownloadError> {
         cancel: cancel.clone(),
         task_id: task_id.clone(),
         key_cache,
-        media_sequence: track.media_sequence,
         tracker: tracker.clone(),
         db: db.clone(),
         sink: sink.clone(),
     });
     let dispatcher = tokio::spawn(dispatch_segments(
-        segment_jobs(&track.segments, first_idx),
+        segment_jobs(&track.segments, first_idx, track.media_sequence),
         shared,
         semaphore,
         result_tx,
@@ -3120,6 +3203,7 @@ async fn run_audio_track(run: AudioRun) -> Result<i64, DownloadError> {
 ///
 /// 产物先写 `<name>.mp4.fdownloading`,再按 [`claim_final_name`] 的不覆盖语义占名。
 /// 失败或取消时两份 temp 原样保留,由调用方回退(仅视频)或续传。
+#[allow(clippy::too_many_arguments)]
 async fn mux_video_audio(
     p: &DownloadParams,
     video_temp: &Path,
@@ -3128,6 +3212,7 @@ async fn mux_video_audio(
     expected_bytes: i64,
     ffmpeg: &Path,
     video_resume_key: &str,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(PathBuf, i64), DownloadError> {
     let save_dir = Path::new(&p.save_dir);
     let stem = Path::new(actual_name)
@@ -3141,7 +3226,7 @@ async fn mux_video_audio(
         Some(audio_temp),
         &mux_tmp,
         expected_bytes.max(0) as u64,
-        &p.cancel_token,
+        cancel,
         ffmpeg,
     )
     .await?;
@@ -3196,6 +3281,1080 @@ async fn mux_video_audio(
 }
 
 // ---------------------------------------------------------------------------
+// 直播录制(播放列表无 EXT-X-ENDLIST)
+// ---------------------------------------------------------------------------
+
+/// 直播播放列表轮询间隔的上下限(秒):EXT-X-TARGETDURATION 夹在其间。
+const LIVE_POLL_MIN_SECS: u64 = 1;
+const LIVE_POLL_MAX_SECS: u64 = 10;
+/// 一轮处理耗时已超过轮询间隔时,下次拉取前的最短等待,避免对源站连续猛拉。
+const LIVE_POLL_FLOOR: Duration = Duration::from_millis(250);
+/// 视频轨因 EXT-X-ENDLIST 结束后,等待音轨拉完最后分片的宽限。
+const LIVE_AUDIO_GRACE: Duration = Duration::from_secs(30);
+
+fn live_poll_interval(target_duration: u64) -> Duration {
+    Duration::from_secs(target_duration.clamp(LIVE_POLL_MIN_SECS, LIVE_POLL_MAX_SECS))
+}
+
+/// 「丢弃」请求注册表(task_id → 令牌):用户**删除**任务时由 manager 置位。
+///
+/// 任务令牌取消只表达"停止"——暂停、取消、删除对下载器不可区分,而直播在停止时要把
+/// 已录内容定稿。删除则不同:用户就是不要这些内容。manager 在取消任务令牌**之前**调用
+/// [`request_discard`],直播录制据此退出后清理 temp / 检查点而不定稿;定稿阶段(ffmpeg
+/// mux / remux)也以该令牌为取消源,因此删除能中断已经开始的定稿。
+static DISCARD_REQUESTS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn discard_requests()
+-> std::sync::MutexGuard<'static, HashMap<String, tokio_util::sync::CancellationToken>> {
+    // 持锁区间只做 HashMap 增删,不会在中途 panic;即便中毒,数据仍然一致。
+    DISCARD_REQUESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// 声明任务将被删除,其正在进行(或刚被取消、仍在定稿)的直播录制不得保存产物。
+/// 调用方须在删除流程结束后调用 [`clear_discard`] 释放登记。
+pub fn request_discard(task_id: &str) {
+    discard_requests()
+        .entry(task_id.to_owned())
+        .or_default()
+        .cancel();
+}
+
+/// 释放 [`request_discard`] 的登记(幂等)。已经取得令牌的下载器不受影响。
+pub fn clear_discard(task_id: &str) {
+    discard_requests().remove(task_id);
+}
+
+fn discard_token(task_id: &str) -> tokio_util::sync::CancellationToken {
+    discard_requests()
+        .entry(task_id.to_owned())
+        .or_default()
+        .clone()
+}
+
+/// 直播录制结束时释放自己登记的丢弃令牌,避免正常完成的任务在注册表里残留。
+struct DiscardGuard(String);
+
+impl Drop for DiscardGuard {
+    fn drop(&mut self) {
+        clear_discard(&self.0);
+    }
+}
+
+/// 删除任务时丢弃直播录制:移除视频 / 音轨 temp 与两个续传检查点,不 remux / mux。
+async fn discard_live_recording(
+    p: &DownloadParams,
+    temp_path: &Path,
+    audio_temp_path: Option<&Path>,
+    video_resume_key: &str,
+) {
+    log_info!(
+        "[hls-download] task {} deleted during live recording, discarding recorded content",
+        p.task_id
+    );
+    for path in std::iter::once(temp_path).chain(audio_temp_path) {
+        if let Err(error) = tokio::fs::remove_file(path).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logger::report_warning("hls-download", "remove_discarded_temp", &error);
+        }
+    }
+    for key in [video_resume_key, audio_resume_key(&p.task_id).as_str()] {
+        if let Err(error) = p.db.delete_config(key).await {
+            crate::logger::report_warning("hls-download", "remove_discarded_checkpoint", &error);
+        }
+    }
+}
+
+/// 解析后的独立音轨播放列表(尚未分配 temp 路径)。
+struct AudioPlaylist {
+    uri: String,
+    segments: Vec<HlsSegment>,
+    media_sequence: u64,
+    /// `Some(EXT-X-TARGETDURATION)` = 直播音轨。
+    live_target: Option<u64>,
+}
+
+/// 某一时刻拉到的媒体播放列表快照。
+struct LivePlaylist {
+    segments: Vec<HlsSegment>,
+    media_sequence: u64,
+    /// `false` = 已出现 EXT-X-ENDLIST,处理完本快照的新分片后录制结束。
+    live: bool,
+    target_duration: u64,
+}
+
+impl LivePlaylist {
+    fn from_content(content: M3u8Content) -> Result<Self, DownloadError> {
+        match content {
+            M3u8Content::Media {
+                segments,
+                media_sequence,
+                live,
+                target_duration,
+                ..
+            } => Ok(Self {
+                segments,
+                media_sequence,
+                live,
+                target_duration,
+            }),
+            M3u8Content::Master { .. } => Err(DownloadError::Other(
+                "nested master playlist not supported".to_string(),
+            )),
+        }
+    }
+}
+
+/// 一次轮询相对已录进度的分片取舍,见 [`plan_live_segments`]。
+#[derive(Debug, PartialEq, Eq)]
+struct LivePlan {
+    /// 本快照中第一个需要下载的分片下标(此前的分片已录过)。
+    start_idx: usize,
+    /// 已滚出播放列表窗口、永久错过的分片数(序号跳跃)。
+    missed: u64,
+    /// 快照整体落后于已录进度(序号回退:源站重启,或 CDN 边缘返回了旧快照)。
+    regressed: bool,
+}
+
+/// 以"下一个期望序号"对账快照,保证按 media sequence 只追加新分片、不重复:
+/// - 首次(`next_seq == None`)取整个当前窗口;
+/// - 期望序号已被窗口滚过 → 记录错过的分片数,从窗口首段继续;
+/// - 快照整体早于期望序号 → 标记回退,本轮不下载任何分片。
+fn plan_live_segments(next_seq: Option<u64>, media_sequence: u64, len: usize) -> LivePlan {
+    let Some(next) = next_seq else {
+        return LivePlan {
+            start_idx: 0,
+            missed: 0,
+            regressed: false,
+        };
+    };
+    let end = media_sequence.saturating_add(len as u64);
+    if end < next {
+        return LivePlan {
+            start_idx: len,
+            missed: 0,
+            regressed: true,
+        };
+    }
+    if next < media_sequence {
+        return LivePlan {
+            start_idx: 0,
+            missed: media_sequence - next,
+            regressed: false,
+        };
+    }
+    LivePlan {
+        start_idx: usize::try_from(next - media_sequence).map_or(len, |n| n.min(len)),
+        missed: 0,
+        regressed: false,
+    }
+}
+
+/// 记录一条 warning 活动;写入失败只留日志,不影响录制。
+async fn record_task_warning(
+    db: &crate::db::Db,
+    sink: &dyn EventSink,
+    task_id: &str,
+    message: impl Into<String>,
+) {
+    if let Err(journal_error) =
+        crate::task_activity::record(db, sink, task_id, "warning", message, None).await
+    {
+        crate::log_error!(
+            "[task-activity] failed to persist warning: {}",
+            journal_error
+        );
+    }
+}
+
+/// 已打开的直播录制 temp 文件及其续传位置。
+struct LiveTemp {
+    file: File,
+    /// 已完整落盘的字节数。
+    bytes: i64,
+    /// 已录分片数(检查点 idx 字段)。
+    recorded: usize,
+    /// 下一个期望的 media sequence(检查点第三字段);`None` = 从当前窗口首段开始。
+    next_seq: Option<u64>,
+}
+
+struct LiveTempSpec<'a> {
+    is_resume: bool,
+    temp_path: &'a Path,
+    resume_key: &'a str,
+    /// 写入检查点的变体 / 音轨标识。
+    tag: Option<&'a str>,
+    /// `true`:续传要求检查点标识与 `tag` 一致(音轨);视频的变体匹配由调用方
+    /// 经 `abandon` 表达(清单签名轮换时标识可能不同但仍是同一画质)。
+    strict_tag: bool,
+    abandon: bool,
+    /// 从头录制时写入零进度检查点用的序号。
+    first_sequence: u64,
+}
+
+/// 打开直播录制的 temp 文件。
+///
+/// 直播检查点沿用点播格式 `idx:bytes:seq[:tag]`,其中 `idx` = 已录分片数,`seq` = 下一个
+/// 期望序号。续传时截断到最后一次完整落盘的字节边界并追加;期望序号仍在播放列表窗口内
+/// 则无缝接上,否则按序号跳跃记 warning 并从窗口首段继续(停机期间的内容无法补录)。
+async fn open_live_temp(
+    db: &crate::db::Db,
+    spec: LiveTempSpec<'_>,
+) -> Result<LiveTemp, DownloadError> {
+    output::ensure_parent(spec.temp_path).await?;
+    let saved = if spec.is_resume {
+        db.get_config(spec.resume_key).await?
+    } else {
+        db.delete_config(spec.resume_key).await?;
+        None
+    };
+    let (saved_idx, saved_bytes, saved_seq) = saved
+        .as_deref()
+        .map(parse_resume_checkpoint)
+        .unwrap_or((0, 0, None));
+    let tag_matches = !spec.strict_tag
+        || saved
+            .as_deref()
+            .and_then(parse_checkpoint_variant)
+            .is_some_and(|v| spec.tag == Some(v.encode().as_str()));
+    let file_size = tokio::fs::metadata(spec.temp_path)
+        .await
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
+    let resume_seq = if !spec.abandon
+        && tag_matches
+        && saved_idx > 0
+        && saved_bytes > 0
+        && file_size >= saved_bytes
+    {
+        saved_seq
+    } else {
+        None
+    };
+
+    match resume_seq {
+        Some(next_seq) => {
+            if saved_bytes < file_size {
+                let truncate_file = OpenOptions::new().write(true).open(spec.temp_path).await?;
+                truncate_file.set_len(saved_bytes as u64).await?;
+            }
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(spec.temp_path)
+                .await?;
+            Ok(LiveTemp {
+                file,
+                bytes: saved_bytes,
+                recorded: saved_idx,
+                next_seq: Some(next_seq),
+            })
+        }
+        None => {
+            let file = File::create(spec.temp_path).await?;
+            if spec.tag.is_some() {
+                db.set_config(
+                    spec.resume_key,
+                    &format_resume_checkpoint(0, 0, spec.first_sequence, spec.tag),
+                )
+                .await?;
+            }
+            Ok(LiveTemp {
+                file,
+                bytes: 0,
+                recorded: 0,
+                next_seq: None,
+            })
+        }
+    }
+}
+
+/// 一条直播轨道(视频或独立音轨)的录制句柄(拥有所有权,供 `tokio::spawn`)。
+struct LiveRun {
+    /// 日志 / 活动里的轨道名("视频" / "音频")。
+    label: &'static str,
+    client: Client,
+    cookies: String,
+    referrer: String,
+    extra_headers: HashMap<String, String>,
+    /// 用户提交的清单 URL:Cookie 同源判定与凭据类请求头只属于它的源站。
+    header_origin_url: String,
+    /// 本轨媒体播放列表 URL(每轮轮询重新拉取它)。
+    playlist_url: String,
+    /// 已解析的首个快照。
+    playlist: LivePlaylist,
+    /// 用户停止(暂停/取消)令牌:取消即"停止录制并保留已录内容"。
+    cancel: tokio_util::sync::CancellationToken,
+    task_id: String,
+    db: crate::db::Db,
+    sink: Arc<dyn EventSink>,
+    speed_limiter: crate::speed_limiter::SpeedLimiter,
+    key_cache: KeyCache,
+    tracker: TransferTracker,
+    /// 本轨已落盘字节数,供进度采样器汇总。
+    written: Arc<AtomicI64>,
+    concurrency: usize,
+    temp: LiveTemp,
+    resume_key: String,
+    tag: Option<String>,
+    /// `Some(另一轨字节数)`:本轨按 [`DB_SAVE_INTERVAL_SECS`] 把两轨合计字节数落库(视频轨负责)。
+    persist_with: Option<Arc<AtomicI64>>,
+}
+
+/// 一条直播轨道录制结束的原因。
+enum LiveEnd {
+    /// 播放列表出现 EXT-X-ENDLIST(流正常结束)。
+    EndList,
+    /// 用户暂停 / 取消。
+    Stopped,
+    /// 连续拉取播放列表或分片失败,放弃继续录制(附原因)。
+    GaveUp(String),
+}
+
+struct LiveOutcome {
+    bytes: i64,
+    end: LiveEnd,
+}
+
+/// 追加写入(可选 init 段 + 媒体段),返回写入字节数;任一步失败都回退到写入前的长度。
+async fn append_live_chunks(
+    file: &mut File,
+    limiter: &crate::speed_limiter::SpeedLimiter,
+    init: Option<&[u8]>,
+    data: &[u8],
+    start_pos: i64,
+) -> Result<i64, DownloadError> {
+    let mut written = 0i64;
+    let mut write_result: Result<(), std::io::Error> = Ok(());
+    'chunks: for chunk in init.into_iter().chain(std::iter::once(data)) {
+        let mut offset = 0usize;
+        while offset < chunk.len() {
+            let remaining = (chunk.len() - offset) as u64;
+            let allowed = limiter.consume(remaining).await.min(remaining);
+            let end = offset + allowed as usize;
+            if let Err(e) = file.write_all(&chunk[offset..end]).await {
+                write_result = Err(e);
+                break 'chunks;
+            }
+            offset = end;
+        }
+        written += chunk.len() as i64;
+    }
+    if let Err(e) = write_result {
+        // 与点播 writer 一致:回退到写入前的长度,避免半截数据污染续传;回退失败
+        // 仅记录,不掩盖原始写入错误。
+        if let Err(trunc_err) = file.set_len(start_pos as u64).await {
+            log_info!(
+                "[hls] live rollback set_len({}) failed: {}",
+                start_pos,
+                trunc_err
+            );
+        }
+        return Err(write_failure(e));
+    }
+    Ok(written)
+}
+
+/// 需要写入 `seg` 的 EXT-X-MAP init 段而缓存里没有时拉取并缓存(只保留最新一份)。
+async fn ensure_live_init(
+    shared: &SegmentShared,
+    seg: &HlsSegment,
+    last_map: Option<&MapKey>,
+    cache: &mut Option<(MapKey, Vec<u8>)>,
+) -> Result<(), DownloadError> {
+    let Some(map) = &seg.map else {
+        return Ok(());
+    };
+    let key: MapKey = (map.uri.clone(), map.byte_range);
+    if !should_write_init(last_map, Some(&key)) || cache.as_ref().is_some_and(|(k, _)| *k == key) {
+        return Ok(());
+    }
+    let data = download_segment_with_retry(
+        &shared.client,
+        &map.uri,
+        map.byte_range,
+        &shared.ctx(),
+        &shared.cancel,
+        &shared.task_id,
+        usize::MAX,
+        &shared.tracker,
+        &shared.db,
+        shared.sink.as_ref(),
+    )
+    .await?;
+    *cache = Some((key, data));
+    Ok(())
+}
+
+/// 重新拉取直播播放列表,按现有重试退避(`MAX_RETRIES` 次,指数延迟);用尽则放弃。
+async fn refetch_live_playlist(
+    shared: &SegmentShared,
+    root_ctx: &HlsRequestCtx<'_>,
+    label: &str,
+) -> Result<LivePlaylist, LiveEnd> {
+    let mut attempts = 0u32;
+    loop {
+        let error = match parse_m3u8(
+            &shared.client,
+            &shared.playlist_url,
+            root_ctx,
+            &shared.cancel,
+        )
+        .await
+        {
+            Ok(content) => match LivePlaylist::from_content(content) {
+                Ok(playlist) => return Ok(playlist),
+                Err(error) => error,
+            },
+            Err(DownloadError::Cancelled) => return Err(LiveEnd::Stopped),
+            Err(error) => error,
+        };
+        attempts += 1;
+        if attempts >= MAX_RETRIES {
+            return Err(LiveEnd::GaveUp(format!(
+                "HLS {label}直播播放列表连续 {MAX_RETRIES} 次拉取失败：{error}"
+            )));
+        }
+        log_info!(
+            "[hls-download] task {} live {} playlist refresh attempt {}/{} failed: {}",
+            shared.task_id,
+            label,
+            attempts,
+            MAX_RETRIES,
+            error
+        );
+        if let Err(journal_error) = crate::task_activity::record(
+            &shared.db,
+            shared.sink.as_ref(),
+            &shared.task_id,
+            "retry",
+            format!(
+                "HLS {label}直播播放列表第 {attempts}/{MAX_RETRIES} 次拉取失败，即将重试：{error}"
+            ),
+            None,
+        )
+        .await
+        {
+            crate::log_error!("[task-activity] failed to persist retry: {}", journal_error);
+        }
+        let delay = RETRY_BASE_DELAY * 2u32.saturating_pow(attempts - 1);
+        tokio::select! {
+            _ = shared.cancel.cancelled() => return Err(LiveEnd::Stopped),
+            _ = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+/// 录制一条直播轨道直到:播放列表出现 EXT-X-ENDLIST、用户停止、或连续失败放弃。
+///
+/// 每一轮:对账快照 → 只下载序号 ≥ 期望序号的新分片(有界并发、按序号顺序落盘)→
+/// 每段落盘后 flush 并写检查点 → 睡到下一个轮询点(只在任务运行期间轮询)→ 重新拉取
+/// 播放列表。序号跳跃(分片滚出窗口)与单个分片下载失败都记 warning 后跳过,连续
+/// `MAX_RETRIES` 个分片失败才放弃。返回 `Err` 只代表无法继续写盘 / 落库(此时 temp 与
+/// 检查点原样保留,可续传)。
+async fn run_live_track(run: LiveRun) -> Result<LiveOutcome, DownloadError> {
+    let LiveRun {
+        label,
+        client,
+        cookies,
+        referrer,
+        extra_headers,
+        header_origin_url,
+        playlist_url,
+        playlist,
+        cancel,
+        task_id,
+        db,
+        sink,
+        speed_limiter,
+        key_cache,
+        tracker,
+        written,
+        concurrency,
+        temp,
+        resume_key,
+        tag,
+        persist_with,
+    } = run;
+    let LiveTemp {
+        mut file,
+        bytes: mut written_bytes,
+        mut recorded,
+        mut next_seq,
+    } = temp;
+    written.store(written_bytes, Ordering::Relaxed);
+
+    // 播放列表请求沿用首次解析时的上下文(以用户 URL 为源站基准)。
+    let root_ctx = HlsRequestCtx {
+        cookies: &cookies,
+        cookie_base_url: &header_origin_url,
+        header_origin_url: &header_origin_url,
+        referrer: &referrer,
+        extra_headers: &extra_headers,
+    };
+    let shared = Arc::new(SegmentShared {
+        client,
+        cookies: cookies.clone(),
+        playlist_url,
+        header_origin_url: header_origin_url.clone(),
+        referrer: referrer.clone(),
+        extra_headers: extra_headers.clone(),
+        cancel: cancel.clone(),
+        task_id: task_id.clone(),
+        key_cache,
+        tracker,
+        db: db.clone(),
+        sink: Arc::clone(&sink),
+    });
+
+    let mut playlist = playlist;
+    let mut init_cache: Option<(MapKey, Vec<u8>)> = None;
+    // 续传后磁盘上最后一份 init 段身份未知,保守地在首段前重写一份(重复 init 对播放器无害)。
+    let mut last_map: Option<MapKey> = None;
+    let mut regressions = 0u32;
+    let mut failures = 0u32;
+    let mut last_db_save = std::time::Instant::now();
+
+    let end = 'record: loop {
+        let cycle_started = std::time::Instant::now();
+        if cancel.is_cancelled() {
+            break LiveEnd::Stopped;
+        }
+
+        let mut plan =
+            plan_live_segments(next_seq, playlist.media_sequence, playlist.segments.len());
+        if plan.regressed {
+            regressions += 1;
+            if regressions >= MAX_RETRIES {
+                record_task_warning(
+                    &db,
+                    sink.as_ref(),
+                    &task_id,
+                    format!(
+                        "HLS {label}直播播放列表序号回退（当前 {}，已录至 {}），按新序号重新开始录制",
+                        playlist.media_sequence,
+                        next_seq.unwrap_or_default()
+                    ),
+                )
+                .await;
+                next_seq = Some(playlist.media_sequence);
+                plan =
+                    plan_live_segments(next_seq, playlist.media_sequence, playlist.segments.len());
+                regressions = 0;
+            }
+        } else {
+            regressions = 0;
+        }
+        if plan.missed > 0 {
+            let first_missed = playlist.media_sequence - plan.missed;
+            record_task_warning(
+                &db,
+                sink.as_ref(),
+                &task_id,
+                format!(
+                    "HLS {label}直播播放列表序号跳跃：序号 {first_missed}–{} 共 {} 个分片已滚出播放列表，已跳过",
+                    playlist.media_sequence - 1,
+                    plan.missed
+                ),
+            )
+            .await;
+        }
+
+        let jobs = segment_jobs(&playlist.segments, plan.start_idx, playlist.media_sequence);
+        // `buffered` 有界并发且按输入顺序产出,writer 因此按序号顺序落盘。每个 future 自带
+        // 所有权(Arc + 分片任务),不借用循环局部变量。
+        let mut results = std::pin::pin!(
+            futures_util::stream::iter(jobs.into_iter().map(|job| {
+                let shared = Arc::clone(&shared);
+                async move { download_and_decrypt_segment(&shared, &job).await }
+            }))
+            .buffered(concurrency)
+        );
+        let mut idx = plan.start_idx;
+        while let Some(result) = results.next().await {
+            let seg_idx = idx;
+            idx += 1;
+            let sequence = playlist.media_sequence.saturating_add(seg_idx as u64);
+            let seg = &playlist.segments[seg_idx];
+            let current_map: Option<MapKey> =
+                seg.map.as_ref().map(|m| (m.uri.clone(), m.byte_range));
+
+            let prepared = match result {
+                Ok(data) => ensure_live_init(&shared, seg, last_map.as_ref(), &mut init_cache)
+                    .await
+                    .map(|()| data),
+                Err(error) => Err(error),
+            };
+            let data = match prepared {
+                Ok(data) => data,
+                Err(DownloadError::Cancelled) => break 'record LiveEnd::Stopped,
+                Err(error) => {
+                    // 该分片(或其 init 段)重试用尽:跳过并继续,避免一个坏分片毁掉整场录制。
+                    next_seq = Some(sequence + 1);
+                    failures += 1;
+                    record_task_warning(
+                        &db,
+                        sink.as_ref(),
+                        &task_id,
+                        format!("HLS {label}直播分片（序号 {sequence}）下载失败，已跳过：{error}"),
+                    )
+                    .await;
+                    if failures >= MAX_RETRIES {
+                        break 'record LiveEnd::GaveUp(format!(
+                            "HLS {label}直播连续 {MAX_RETRIES} 个分片下载失败：{error}"
+                        ));
+                    }
+                    continue;
+                }
+            };
+            failures = 0;
+
+            let init: Option<&[u8]> = if should_write_init(last_map.as_ref(), current_map.as_ref())
+            {
+                match &init_cache {
+                    Some((key, bytes)) if Some(key) == current_map.as_ref() => {
+                        Some(bytes.as_slice())
+                    }
+                    _ => {
+                        return Err(DownloadError::Other(format!(
+                            "internal error: live init segment for {current_map:?} was not fetched"
+                        )));
+                    }
+                }
+            } else {
+                None
+            };
+            let chunk_len =
+                append_live_chunks(&mut file, &speed_limiter, init, &data, written_bytes).await?;
+            if init.is_some() {
+                last_map = current_map;
+            }
+            written_bytes += chunk_len;
+            recorded += 1;
+            next_seq = Some(sequence + 1);
+            written.store(written_bytes, Ordering::Relaxed);
+
+            file.flush().await?;
+            db.set_config(
+                &resume_key,
+                &format_resume_checkpoint(recorded, written_bytes, sequence + 1, tag.as_deref()),
+            )
+            .await?;
+            if let Some(other) = &persist_with
+                && last_db_save.elapsed().as_secs() >= DB_SAVE_INTERVAL_SECS
+            {
+                db.update_task_progress(&task_id, written_bytes + other.load(Ordering::Relaxed))
+                    .await?;
+                last_db_save = std::time::Instant::now();
+            }
+            log_info!(
+                "[hls-download] task {} live {} segment seq {} done, {} bytes total",
+                task_id,
+                label,
+                sequence,
+                written_bytes
+            );
+        }
+
+        if !playlist.live {
+            break LiveEnd::EndList;
+        }
+        let wait = live_poll_interval(playlist.target_duration)
+            .saturating_sub(cycle_started.elapsed())
+            .max(LIVE_POLL_FLOOR);
+        tokio::select! {
+            _ = cancel.cancelled() => break LiveEnd::Stopped,
+            _ = tokio::time::sleep(wait) => {}
+        }
+        match refetch_live_playlist(&shared, &root_ctx, label).await {
+            Ok(next) => playlist = next,
+            Err(end) => break end,
+        }
+    };
+
+    file.flush().await.map_err(write_failure)?;
+    log_info!(
+        "[hls-download] task {} live {} recording ended after {} segment(s), {} bytes",
+        task_id,
+        label,
+        recorded,
+        written_bytes
+    );
+    Ok(LiveOutcome {
+        bytes: written_bytes,
+        end,
+    })
+}
+
+/// 视频(及可选独立音轨)进度采样器:每 200ms 汇总两轨已落盘字节上报一次。
+/// 直播总大小未知,`total_bytes` 恒为 0(与点播同一"未知"语义)。
+fn spawn_progress_sampler(
+    tx: mpsc::Sender<ProgressUpdate>,
+    task_id: String,
+    tracker: TransferTracker,
+    video_bytes: Arc<AtomicI64>,
+    audio_bytes: Arc<AtomicI64>,
+    limit: u32,
+) -> AbortOnDrop {
+    AbortOnDrop(tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(200));
+        loop {
+            ticker.tick().await;
+            if tx
+                .send(ProgressUpdate {
+                    task_id: task_id.clone(),
+                    downloaded_bytes: video_bytes.load(Ordering::Relaxed)
+                        + audio_bytes.load(Ordering::Relaxed),
+                    total_bytes: 0,
+                    status: 1,
+                    runtime: Some(hls_runtime(&task_id, &tracker, limit)),
+                    ..Default::default()
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    }))
+}
+
+/// 直播录制所需的全部事实(由 `run_hls_download_inner` 在创建 temp 文件前收集)。
+struct LiveRecording {
+    segments: Vec<HlsSegment>,
+    media_sequence: u64,
+    target_duration: u64,
+    playlist_url: String,
+    is_fmp4: bool,
+    variant_tag: Option<String>,
+    abandon_resume: bool,
+    audio: Option<AudioTrack>,
+    ffmpeg: Option<PathBuf>,
+    temp_path: PathBuf,
+    dest_path: PathBuf,
+    actual_name: String,
+    save_dir: PathBuf,
+    resume_key: String,
+}
+
+/// 把停止前最后已知的两轨合计字节数落库(失败只告警,原始结果优先)。
+async fn persist_live_progress(p: &DownloadParams, bytes: i64) {
+    if let Err(error) = p.db.update_task_progress(&p.task_id, bytes).await {
+        crate::logger::report_warning("hls-download", "persist_failed_progress", &error);
+    }
+}
+
+/// 直播录制:视频(与可选独立音轨并行)持续录制,结束后与点播共用 [`finalize_recording`]
+/// 定稿为完成文件。
+///
+/// 停止语义:播放列表出现 ENDLIST、用户暂停 / 取消(任务令牌取消)、播放列表连续拉取
+/// 失败,三者都以**已录内容定稿并报告完成**,而不是丢弃——直播没有"稍后从断点继续"的
+/// 意义(断点之后的内容已经过去了)。只有一个字节都没录到时才按取消 / 失败上报。
+/// 写盘 / 落库失败仍是任务错误,temp 与检查点保留,恢复时从检查点追加。
+async fn run_live_recording(p: &DownloadParams, rec: LiveRecording) -> Result<i64, DownloadError> {
+    let LiveRecording {
+        segments,
+        media_sequence,
+        target_duration,
+        playlist_url,
+        is_fmp4,
+        variant_tag,
+        abandon_resume,
+        audio,
+        ffmpeg,
+        temp_path,
+        dest_path,
+        actual_name,
+        save_dir,
+        resume_key,
+    } = rec;
+    log_info!(
+        "[hls-download] task {} recording live stream, media_sequence={}, {} segment(s) in window",
+        p.task_id,
+        media_sequence,
+        segments.len()
+    );
+    let discard = discard_token(&p.task_id);
+    let _discard_guard = DiscardGuard(p.task_id.clone());
+
+    let concurrency = hls_concurrency(p.segment_count, MAX_HLS_CONCURRENCY);
+    let video_temp = open_live_temp(
+        &p.db,
+        LiveTempSpec {
+            is_resume: p.is_resume,
+            temp_path: &temp_path,
+            resume_key: &resume_key,
+            tag: variant_tag.as_deref(),
+            strict_tag: false,
+            abandon: abandon_resume,
+            first_sequence: media_sequence,
+        },
+    )
+    .await?;
+    let audio_parts = match audio {
+        Some(track) => {
+            let temp = open_live_temp(
+                &p.db,
+                LiveTempSpec {
+                    is_resume: p.is_resume,
+                    temp_path: &track.temp_path,
+                    resume_key: &track.resume_key,
+                    tag: Some(&track.tag),
+                    strict_tag: true,
+                    abandon: false,
+                    first_sequence: track.media_sequence,
+                },
+            )
+            .await?;
+            Some((track, temp))
+        }
+        None => None,
+    };
+    let audio_temp_path = audio_parts.as_ref().map(|(t, _)| t.temp_path.clone());
+
+    let key_cache: KeyCache = Arc::new(Mutex::new(HashMap::new()));
+    let tracker = TransferTracker::new();
+    let video_written = Arc::new(AtomicI64::new(video_temp.bytes));
+    let audio_written = Arc::new(AtomicI64::new(0));
+    let mut sampler = spawn_progress_sampler(
+        p.progress_tx.clone(),
+        p.task_id.clone(),
+        tracker.clone(),
+        Arc::clone(&video_written),
+        Arc::clone(&audio_written),
+        concurrency as u32,
+    );
+
+    // 音轨令牌是任务令牌的子令牌:用户停止时随之取消;视频因 ENDLIST/放弃而先结束时
+    // 由本函数单独取消它。音轨的真实错误升级为任务级取消(视频随之以"停止"收尾,
+    // 最终以音轨错误为准),与点播一致。
+    let audio_cancel = p.cancel_token.child_token();
+    let audio_handle = audio_parts.map(|(track, temp)| {
+        let run = LiveRun {
+            label: "音频",
+            client: p.client.clone(),
+            cookies: p.cookies.clone(),
+            referrer: p.referrer.clone(),
+            extra_headers: p.extra_headers.clone(),
+            header_origin_url: p.url.clone(),
+            playlist_url: track.playlist_url.clone(),
+            playlist: LivePlaylist {
+                segments: track.segments,
+                media_sequence: track.media_sequence,
+                live: true,
+                target_duration: track.live_target.unwrap_or(target_duration),
+            },
+            cancel: audio_cancel.clone(),
+            task_id: p.task_id.clone(),
+            db: p.db.clone(),
+            sink: p.sink.clone(),
+            speed_limiter: p.speed_limiter.clone(),
+            key_cache: key_cache.clone(),
+            tracker: tracker.clone(),
+            written: Arc::clone(&audio_written),
+            concurrency: concurrency.min(AUDIO_TRACK_MAX_CONCURRENCY),
+            temp,
+            resume_key: track.resume_key,
+            tag: Some(track.tag),
+            persist_with: None,
+        };
+        let parent = p.cancel_token.clone();
+        tokio::spawn(async move {
+            let result = run_live_track(run).await;
+            if result.is_err() {
+                parent.cancel();
+            }
+            result
+        })
+    });
+
+    let video = run_live_track(LiveRun {
+        label: "视频",
+        client: p.client.clone(),
+        cookies: p.cookies.clone(),
+        referrer: p.referrer.clone(),
+        extra_headers: p.extra_headers.clone(),
+        header_origin_url: p.url.clone(),
+        playlist_url,
+        playlist: LivePlaylist {
+            segments,
+            media_sequence,
+            live: true,
+            target_duration,
+        },
+        cancel: p.cancel_token.clone(),
+        task_id: p.task_id.clone(),
+        db: p.db.clone(),
+        sink: p.sink.clone(),
+        speed_limiter: p.speed_limiter.clone(),
+        key_cache,
+        tracker,
+        written: Arc::clone(&video_written),
+        concurrency,
+        temp: video_temp,
+        resume_key: resume_key.clone(),
+        tag: variant_tag,
+        persist_with: Some(Arc::clone(&audio_written)),
+    })
+    .await;
+
+    // 视频因 ENDLIST 结束时音轨通常只差最后一两个分片:给它一个宽限追平;其余情况
+    // (用户停止 / 放弃 / 写盘失败)立即停音轨。
+    let video_ended_normally = matches!(&video, Ok(o) if matches!(o.end, LiveEnd::EndList));
+    if !video_ended_normally {
+        audio_cancel.cancel();
+    }
+    let audio_result = match audio_handle {
+        Some(mut handle) => {
+            let joined = if video_ended_normally {
+                match tokio::time::timeout(LIVE_AUDIO_GRACE, &mut handle).await {
+                    Ok(joined) => joined,
+                    Err(_) => {
+                        audio_cancel.cancel();
+                        (&mut handle).await
+                    }
+                }
+            } else {
+                (&mut handle).await
+            };
+            Some(match joined {
+                Ok(result) => result,
+                Err(error) => {
+                    crate::logger::report_error("hls-download", "join_live_audio_worker", &error);
+                    Err(DownloadError::Other(format!(
+                        "HLS audio track task failed: {error}"
+                    )))
+                }
+            })
+        }
+        None => None,
+    };
+    sampler.abort();
+    if let Err(error) = (&mut sampler.0).await
+        && !error.is_cancelled()
+    {
+        crate::logger::report_error("hls-download", "join_progress_sampler", &error);
+    }
+    // 用户删除:录制循环已随任务令牌退出,这里不再定稿,直接清理。
+    if discard.is_cancelled() {
+        discard_live_recording(p, &temp_path, audio_temp_path.as_deref(), &resume_key).await;
+        return Err(DownloadError::Cancelled);
+    }
+
+    let total_so_far =
+        video_written.load(Ordering::Relaxed) + audio_written.load(Ordering::Relaxed);
+    let video = match video {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            persist_live_progress(p, total_so_far).await;
+            return Err(error);
+        }
+    };
+    let audio_outcome = match audio_result {
+        Some(Ok(outcome)) => Some(outcome),
+        Some(Err(error)) => {
+            persist_live_progress(p, total_so_far).await;
+            return Err(error);
+        }
+        None => None,
+    };
+
+    if video.bytes == 0 {
+        persist_live_progress(p, total_so_far).await;
+        return Err(match video.end {
+            LiveEnd::Stopped => DownloadError::Cancelled,
+            LiveEnd::GaveUp(message) => DownloadError::Other(message),
+            LiveEnd::EndList => {
+                DownloadError::Other("HLS 直播流结束时没有录到任何分片".to_string())
+            }
+        });
+    }
+
+    match &video.end {
+        LiveEnd::GaveUp(message) => {
+            record_task_warning(
+                &p.db,
+                p.sink.as_ref(),
+                &p.task_id,
+                format!("{message}；已按已录内容完成"),
+            )
+            .await;
+        }
+        LiveEnd::Stopped => log_info!(
+            "[hls-download] task {} live recording stopped by user, finalizing {} bytes",
+            p.task_id,
+            video.bytes
+        ),
+        LiveEnd::EndList => {}
+    }
+
+    let (audio_bytes, audio_temp_path) = match (audio_outcome, audio_temp_path) {
+        (Some(audio), Some(audio_temp)) => {
+            if let LiveEnd::GaveUp(message) = &audio.end {
+                record_task_warning(
+                    &p.db,
+                    p.sink.as_ref(),
+                    &p.task_id,
+                    format!("{message}；音频轨按已录内容合并"),
+                )
+                .await;
+            }
+            if audio.bytes > 0 {
+                (audio.bytes, Some(audio_temp))
+            } else {
+                // 音轨一个分片都没录到:丢弃空音轨,只出视频并留下 warning 活动。
+                record_task_warning(
+                    &p.db,
+                    p.sink.as_ref(),
+                    &p.task_id,
+                    "未能录到任何音频分片，输出仅含视频，输出文件可能没有声音",
+                )
+                .await;
+                if let Err(error) = tokio::fs::remove_file(&audio_temp).await
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    crate::logger::report_warning("hls-download", "remove_temporary_file", &error);
+                }
+                if let Err(error) = p.db.delete_config(&audio_resume_key(&p.task_id)).await {
+                    crate::logger::report_warning(
+                        "hls-download",
+                        "remove_audio_checkpoint",
+                        &error,
+                    );
+                }
+                (0, None)
+            }
+        }
+        _ => (0, None),
+    };
+
+    // 定稿期间的 ffmpeg mux / remux 不能沿用任务令牌:暂停 / 取消(= 停止并保存)时它已
+    // 取消,会让已录内容无法定稿。改用丢弃令牌——只有删除才会中断定稿。
+    let finalize_cancel = discard;
+    finalize_recording(
+        p,
+        FinalizeInput {
+            temp_path,
+            dest_path,
+            save_dir,
+            audio_temp_path,
+            ffmpeg,
+            actual_name,
+            resume_key,
+            is_fmp4,
+            downloaded_bytes: video.bytes,
+            audio_bytes,
+        },
+        &finalize_cancel,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // Per-segment download + decrypt (concurrency unit)
 // ---------------------------------------------------------------------------
 
@@ -3204,6 +4363,8 @@ type SegmentOutcome = (usize, Result<Vec<u8>, DownloadError>, OwnedSemaphorePerm
 
 struct SegmentJob {
     idx: usize,
+    /// 绝对 media sequence:无显式 IV 的 AES-128 段据此推导 IV(直播里下标与序号不再等差)。
+    sequence: u64,
     uri: String,
     byte_range: Option<(u64, u64)>,
     /// `Some((key_uri, iv))` 仅用于带非空密钥 URI 的 AES-128 段。
@@ -3221,7 +4382,6 @@ struct SegmentShared {
     cancel: tokio_util::sync::CancellationToken,
     task_id: String,
     key_cache: KeyCache,
-    media_sequence: u64,
     tracker: TransferTracker,
     db: crate::db::Db,
     sink: Arc<dyn EventSink>,
@@ -3373,7 +4533,7 @@ async fn download_and_decrypt_segment(
     // segment's own index so concurrency never changes the IV.
     let iv = match iv_str {
         Some(iv_hex) => parse_iv_hex(iv_hex)?,
-        None => compute_default_iv(shared.media_sequence, job.idx),
+        None => compute_default_iv(job.sequence, 0),
     };
 
     let mut data_buf = seg_data;
@@ -4501,6 +5661,7 @@ v360.m3u8\n\
             track: super::AudioTrack {
                 segments,
                 media_sequence: 0,
+                live_target: None,
                 playlist_url: playlist_url.clone(),
                 temp_path: temp_path.to_path_buf(),
                 resume_key: super::audio_resume_key("t-audio"),
@@ -4855,5 +6016,506 @@ v360.m3u8\n\
             }
             M3u8Content::Master { .. } => panic!("expected media playlist"),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // 直播录制
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn discard_registry_cancels_registered_and_late_tokens_and_clears() {
+        let id = "discard-registry-unit";
+        let early = super::discard_token(id);
+        assert!(!early.is_cancelled());
+        super::request_discard(id);
+        assert!(
+            early.is_cancelled(),
+            "request must reach an already held token"
+        );
+        assert!(
+            super::discard_token(id).is_cancelled(),
+            "a downloader starting after the request must observe it"
+        );
+        super::clear_discard(id);
+        let fresh = super::discard_token(id);
+        assert!(!fresh.is_cancelled(), "clear must forget the request");
+        super::clear_discard(id);
+    }
+
+    #[test]
+    fn live_poll_interval_is_clamped_to_one_to_ten_seconds() {
+        assert_eq!(
+            super::live_poll_interval(0),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            super::live_poll_interval(1),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            super::live_poll_interval(6),
+            std::time::Duration::from_secs(6)
+        );
+        assert_eq!(
+            super::live_poll_interval(30),
+            std::time::Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn plan_live_segments_dedups_and_reports_gaps() {
+        use super::{LivePlan, plan_live_segments};
+        // 首次:取整个当前窗口。
+        assert_eq!(
+            plan_live_segments(None, 100, 4),
+            LivePlan {
+                start_idx: 0,
+                missed: 0,
+                regressed: false
+            }
+        );
+        // 窗口滑动,只取序号 ≥ 期望序号的新分片。
+        assert_eq!(
+            plan_live_segments(Some(102), 100, 4),
+            LivePlan {
+                start_idx: 2,
+                missed: 0,
+                regressed: false
+            }
+        );
+        // 无新分片(期望序号恰为窗口末尾之后)。
+        assert_eq!(
+            plan_live_segments(Some(104), 100, 4),
+            LivePlan {
+                start_idx: 4,
+                missed: 0,
+                regressed: false
+            }
+        );
+        // 序号跳跃:期望的 98、99 已滚出窗口。
+        assert_eq!(
+            plan_live_segments(Some(98), 100, 4),
+            LivePlan {
+                start_idx: 0,
+                missed: 2,
+                regressed: false
+            }
+        );
+        // 快照整体落后于已录进度(源站重启 / 旧缓存):不下载任何分片。
+        assert_eq!(
+            plan_live_segments(Some(500), 0, 4),
+            LivePlan {
+                start_idx: 4,
+                missed: 0,
+                regressed: true
+            }
+        );
+    }
+
+    #[test]
+    fn segment_jobs_carry_absolute_sequence_for_iv() {
+        let segments: Vec<super::HlsSegment> = (0..4)
+            .map(|i| super::HlsSegment {
+                uri: format!("https://example.com/s{i}.ts"),
+                duration: 1.0,
+                key: None,
+                byte_range: None,
+                discontinuity: false,
+                map: None,
+            })
+            .collect();
+        let jobs = super::segment_jobs(&segments, 2, 1000);
+        assert_eq!(
+            jobs.iter().map(|j| (j.idx, j.sequence)).collect::<Vec<_>>(),
+            vec![(2, 1002), (3, 1003)]
+        );
+    }
+
+    /// 同一路径按请求次序依次返回不同 body(用尽后沿用最后一个);`None` = 404。
+    async fn sequenced_server(
+        routes: Vec<(String, Vec<Option<Vec<u8>>>)>,
+    ) -> Result<std::net::SocketAddr, std::io::Error> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = listener.local_addr()?;
+        let routes = std::sync::Arc::new(routes);
+        let counts = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            usize,
+        >::new()));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let routes = std::sync::Arc::clone(&routes);
+                let counts = std::sync::Arc::clone(&counts);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let Ok(n) = socket.read(&mut buf).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    let path = request
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let nth = match counts.lock() {
+                        Ok(mut counts) => {
+                            let hits = counts.entry(path.clone()).or_insert(0);
+                            *hits += 1;
+                            *hits - 1
+                        }
+                        Err(_) => 0,
+                    };
+                    let body =
+                        routes
+                            .iter()
+                            .find(|(route, _)| *route == path)
+                            .and_then(|(_, bodies)| {
+                                bodies
+                                    .get(nth.min(bodies.len().saturating_sub(1)))
+                                    .cloned()
+                                    .flatten()
+                            });
+                    let response = match body {
+                        Some(body) => {
+                            let mut response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .into_bytes();
+                            response.extend(body);
+                            response
+                        }
+                        None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_vec(),
+                    };
+                    if let Err(error) = socket.write_all(&response).await {
+                        tracing::debug!(%error, "HLS fixture client disconnected");
+                    }
+                });
+            }
+        });
+        Ok(address)
+    }
+
+    fn live_segment_body(sequence: u64) -> Vec<u8> {
+        format!("S{sequence}-{}", "x".repeat(sequence as usize + 1)).into_bytes()
+    }
+
+    fn live_segment_routes(sequences: std::ops::Range<u64>) -> Vec<(String, Vec<Option<Vec<u8>>>)> {
+        sequences
+            .map(|n| (format!("/live/s{n}.ts"), vec![Some(live_segment_body(n))]))
+            .collect()
+    }
+
+    fn live_playlist_text(media_sequence: u64, count: u64, end: bool) -> String {
+        let mut text = format!(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{media_sequence}\n"
+        );
+        for n in media_sequence..media_sequence + count {
+            text.push_str(&format!("#EXTINF:1.0,\ns{n}.ts\n"));
+        }
+        if end {
+            text.push_str("#EXT-X-ENDLIST\n");
+        }
+        text
+    }
+
+    fn live_playlist_body(media_sequence: u64, count: u64, end: bool) -> Option<Vec<u8>> {
+        Some(live_playlist_text(media_sequence, count, end).into_bytes())
+    }
+
+    async fn live_run_fixture(
+        address: std::net::SocketAddr,
+        first_playlist: &str,
+        temp: super::LiveTemp,
+        db: &crate::db::Db,
+        cancel: tokio_util::sync::CancellationToken,
+        written: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    ) -> Result<super::LiveRun, Box<dyn std::error::Error>> {
+        let playlist_url = format!("http://{address}/live/index.m3u8");
+        let playlist = super::LivePlaylist::from_content(super::parse_m3u8_bytes(
+            &playlist_url,
+            first_playlist.as_bytes(),
+        )?)?;
+        Ok(super::LiveRun {
+            label: "视频",
+            client: reqwest::Client::builder().no_proxy().build()?,
+            cookies: String::new(),
+            referrer: String::new(),
+            extra_headers: std::collections::HashMap::new(),
+            header_origin_url: playlist_url.clone(),
+            playlist_url,
+            playlist,
+            cancel,
+            task_id: "t-live".to_owned(),
+            db: db.clone(),
+            sink: std::sync::Arc::new(crate::NoopSink),
+            speed_limiter: crate::speed_limiter::SpeedLimiter::new(0),
+            key_cache: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            tracker: super::TransferTracker::new(),
+            written,
+            concurrency: 3,
+            temp,
+            resume_key: "hls_resume_t-live".to_owned(),
+            tag: None,
+            persist_with: None,
+        })
+    }
+
+    async fn fresh_live_temp(path: &std::path::Path) -> Result<super::LiveTemp, std::io::Error> {
+        Ok(super::LiveTemp {
+            file: super::File::create(path).await?,
+            bytes: 0,
+            recorded: 0,
+            next_seq: None,
+        })
+    }
+
+    fn concat_segments(sequences: &[u64]) -> Vec<u8> {
+        sequences
+            .iter()
+            .flat_map(|n| live_segment_body(*n))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn live_track_appends_new_segments_per_poll_until_endlist()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // 首个快照 5,6;第二次轮询窗口滑到 6,7(6 重叠);第三次 7,8 且 ENDLIST。
+        let mut routes = live_segment_routes(5..9);
+        routes.push((
+            "/live/index.m3u8".to_owned(),
+            vec![
+                live_playlist_body(6, 2, false),
+                live_playlist_body(7, 2, true),
+            ],
+        ));
+        let address = sequenced_server(routes).await?;
+        let dir = scratch_dir("live_append");
+        let temp = dir.join("live.ts.fdownloading");
+        let db = crate::db::Db::connect("sqlite::memory:").await?;
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let run = live_run_fixture(
+            address,
+            &live_playlist_text(5, 2, false),
+            fresh_live_temp(&temp).await?,
+            &db,
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::clone(&written),
+        )
+        .await?;
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            super::run_live_track(run),
+        )
+        .await??;
+
+        let expected = concat_segments(&[5, 6, 7, 8]);
+        assert!(matches!(outcome.end, super::LiveEnd::EndList));
+        assert_eq!(
+            std::fs::read(&temp)?,
+            expected,
+            "every segment once, in order"
+        );
+        assert_eq!(outcome.bytes, expected.len() as i64);
+        assert_eq!(
+            written.load(std::sync::atomic::Ordering::Relaxed),
+            expected.len() as i64
+        );
+        let checkpoint = db
+            .get_config("hls_resume_t-live")
+            .await?
+            .unwrap_or_default();
+        assert_eq!(checkpoint, format!("4:{}:9", expected.len()));
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_track_sequence_gap_is_skipped_not_fatal() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // 首个快照 0,1;下次轮询窗口已滚到 5,6(2–4 永久错过)且 ENDLIST。
+        let mut routes = live_segment_routes(0..7);
+        routes.push((
+            "/live/index.m3u8".to_owned(),
+            vec![live_playlist_body(5, 2, true)],
+        ));
+        let address = sequenced_server(routes).await?;
+        let dir = scratch_dir("live_gap");
+        let temp = dir.join("live.ts.fdownloading");
+        let db = crate::db::Db::connect("sqlite::memory:").await?;
+        let run = live_run_fixture(
+            address,
+            &live_playlist_text(0, 2, false),
+            fresh_live_temp(&temp).await?,
+            &db,
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        )
+        .await?;
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            super::run_live_track(run),
+        )
+        .await??;
+
+        assert!(matches!(outcome.end, super::LiveEnd::EndList));
+        assert_eq!(std::fs::read(&temp)?, concat_segments(&[0, 1, 5, 6]));
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_track_stop_keeps_recorded_segments() -> Result<(), Box<dyn std::error::Error>> {
+        // 播放列表永不结束;录到两个分片后用户停止。
+        let mut routes = live_segment_routes(0..2);
+        routes.push((
+            "/live/index.m3u8".to_owned(),
+            vec![live_playlist_body(0, 2, false)],
+        ));
+        let address = sequenced_server(routes).await?;
+        let dir = scratch_dir("live_stop");
+        let temp = dir.join("live.ts.fdownloading");
+        let db = crate::db::Db::connect("sqlite::memory:").await?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let run = live_run_fixture(
+            address,
+            &live_playlist_text(0, 2, false),
+            fresh_live_temp(&temp).await?,
+            &db,
+            cancel.clone(),
+            std::sync::Arc::clone(&written),
+        )
+        .await?;
+        let expected = concat_segments(&[0, 1]);
+
+        let handle = tokio::spawn(super::run_live_track(run));
+        for _ in 0..400 {
+            if written.load(std::sync::atomic::Ordering::Relaxed) >= expected.len() as i64 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        cancel.cancel();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await???;
+
+        assert!(matches!(outcome.end, super::LiveEnd::Stopped));
+        assert_eq!(std::fs::read(&temp)?, expected);
+        assert_eq!(outcome.bytes, expected.len() as i64);
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_track_gives_up_after_playlist_retries_but_keeps_recording()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // 首个快照之后播放列表一直 404:按 MAX_RETRIES 退避后放弃,已录内容保留。
+        let mut routes = live_segment_routes(0..2);
+        routes.push(("/live/index.m3u8".to_owned(), vec![None]));
+        let address = sequenced_server(routes).await?;
+        let dir = scratch_dir("live_give_up");
+        let temp = dir.join("live.ts.fdownloading");
+        let db = crate::db::Db::connect("sqlite::memory:").await?;
+        let run = live_run_fixture(
+            address,
+            &live_playlist_text(0, 2, false),
+            fresh_live_temp(&temp).await?,
+            &db,
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        )
+        .await?;
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            super::run_live_track(run),
+        )
+        .await??;
+
+        match &outcome.end {
+            super::LiveEnd::GaveUp(message) => {
+                assert!(
+                    message.contains(&super::MAX_RETRIES.to_string()),
+                    "{message}"
+                );
+            }
+            _ => panic!("expected the recording to give up"),
+        }
+        assert_eq!(std::fs::read(&temp)?, concat_segments(&[0, 1]));
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_temp_resume_continues_from_saved_sequence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // 上次已录序号 3、4 并写了检查点(下一个期望序号 5),temp 末尾还有半截脏数据;
+        // 续传后截到检查点字节边界,只追加 5、6。
+        let address = sequenced_server({
+            let mut routes = live_segment_routes(3..7);
+            routes.push((
+                "/live/index.m3u8".to_owned(),
+                vec![live_playlist_body(3, 4, true)],
+            ));
+            routes
+        })
+        .await?;
+        let dir = scratch_dir("live_resume");
+        let temp = dir.join("live.ts.fdownloading");
+        let prefix = concat_segments(&[3, 4]);
+        let mut on_disk = prefix.clone();
+        on_disk.extend_from_slice(b"partial-garbage");
+        std::fs::write(&temp, &on_disk)?;
+        let db = crate::db::Db::connect("sqlite::memory:").await?;
+        db.set_config(
+            "hls_resume_t-live",
+            &super::format_resume_checkpoint(2, prefix.len() as i64, 5, None),
+        )
+        .await?;
+
+        let opened = super::open_live_temp(
+            &db,
+            super::LiveTempSpec {
+                is_resume: true,
+                temp_path: &temp,
+                resume_key: "hls_resume_t-live",
+                tag: None,
+                strict_tag: false,
+                abandon: false,
+                first_sequence: 3,
+            },
+        )
+        .await?;
+        assert_eq!(opened.next_seq, Some(5));
+        assert_eq!(opened.recorded, 2);
+        let run = live_run_fixture(
+            address,
+            &live_playlist_text(3, 4, false),
+            opened,
+            &db,
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        )
+        .await?;
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            super::run_live_track(run),
+        )
+        .await??;
+
+        assert!(matches!(outcome.end, super::LiveEnd::EndList));
+        assert_eq!(std::fs::read(&temp)?, concat_segments(&[3, 4, 5, 6]));
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 }

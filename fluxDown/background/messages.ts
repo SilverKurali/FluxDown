@@ -19,6 +19,8 @@ import {
   nmhListTasks,
   nmhWarmupNativeHost,
 } from "@/utils/native-messaging";
+import { parseDashJson } from "@/utils/dash-manifest";
+import { normalizeHlsPlaylist } from "@/utils/hls-playlist";
 import { buildMediaCandidates } from "@/utils/media-candidates";
 import { buildResourceDebugLog } from "@/utils/resource-debug-log";
 import { profileFor } from "@/utils/site-profiles";
@@ -31,6 +33,8 @@ import {
 } from "./downloads";
 import { getCapabilities, invalidateCapabilities } from "./host";
 import { markPreempted } from "./intercept";
+import { rememberServiceWorkerScope } from "./sw-scopes";
+import { scopeBelongsTo } from "@/utils/download-source";
 import type { PageConfig } from "@/page/bridge";
 import type {
   HostStatus,
@@ -45,11 +49,14 @@ import {
   addManifest,
   clearResourcesOnly,
   framesOf,
+  addHlsPlaylist,
   getManifests,
+  getHlsPlaylists,
+  getElements,
   getResources,
   getTabPageUrl,
   ingestResources,
-  pageUrlKey,
+  isCurrentPage,
   registerFrame,
   setContextTarget,
   syncTabPageUrl,
@@ -77,8 +84,13 @@ function senderTabId(sender: Sender): number | undefined {
   return id !== undefined && id >= 0 ? id : undefined;
 }
 
-/** content script 以 sender.tab 为准（不信任页面自报）；扩展页用显式 tabId，缺省取活动 tab。 */
+/**
+ * content script 以 sender.tab 为准（不信任页面自报）；扩展页（含以 tab 打开的选项页）用显式 tabId，
+ * 缺省取活动 tab。
+ */
 async function resolveTabId(sender: Sender, explicit?: number): Promise<number | undefined> {
+  const fromExtensionPage = sender.url?.startsWith(browser.runtime.getURL("/")) === true;
+  if (fromExtensionPage && typeof explicit === "number" && explicit >= 0) return explicit;
   const fromSender = senderTabId(sender);
   if (fromSender !== undefined) return fromSender;
   if (typeof explicit === "number" && explicit >= 0) return explicit;
@@ -148,11 +160,13 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
     const [settings, profiles] = await Promise.all([getCachedSettings(), getCachedProfiles()]);
     if (tabId !== undefined) {
       registerFrame(tabId, frameId);
-      if (frameId === 0) syncTabPageUrl(tabId, req.pageUrl, true);
+      if (frameId === 0) syncTabPageUrl(tabId, req.pageUrl, "document");
     }
     const topUrl = (tabId !== undefined && getTabPageUrl(tabId)) || sender.tab?.url || req.pageUrl;
     const profile = profileFor(profiles, hostOf(topUrl)).profile;
     const engine = getEngine();
+    // 嵌入播放器的子帧同时受自身页面与顶层页面的 page 规则约束（标题多在顶层，排除规则可能写给子帧）。
+    const hints = [engine.pageHints(req.pageUrl), ...(topUrl !== req.pageUrl ? [engine.pageHints(topUrl)] : [])];
     const config: PageConfig = {
       sniff: settings.resourceSniffing && profile.sniff,
       bodyWatch: engine.bodyWatchers(req.pageUrl).map((w) => ({
@@ -168,6 +182,9 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
       })),
       floatButton: settings.showFloatingButton && profile.floatButton,
       floatTrigger: settings.floatButtonTrigger,
+      floatPosition: settings.floatButtonPosition,
+      titles: hints.flatMap((h) => h.titles),
+      floatExclude: hints.flatMap((h) => h.players.map((p) => p.selector)),
       pageDot: settings.showPageDot && profile.pageDot,
       frameIsTop: frameId === 0,
       interceptMagnet: settings.enabled && settings.interceptMagnet && profile.intercept !== "never",
@@ -180,13 +197,11 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
     const tabId = senderTabId(sender);
     if (tabId === undefined || req.resources.length === 0) return { added: 0 };
     const frameId = sender.frameId ?? 0;
-    const tabUrl = getTabPageUrl(tabId);
-    // 批量上报有 200 ms 合批延迟：顶层帧里页面 URL 与 tab 当前页不同的资源属于已离开的旧页面，
+    // 批量上报有 200 ms 合批延迟：顶层帧里不属于当前嗅探投影的资源来自已离开的旧页面，
     // 直接丢弃；不能再用它去同步 tab 页面 URL（会把刚换页清空的状态又改回旧页并再次清空）。
+    // replaceState 改写过的旧 URL 仍属于当前投影（见 syncTabPageUrl）。
     const resources =
-      frameId === 0 && tabUrl
-        ? req.resources.filter((r) => !r.pageUrl || pageUrlKey(r.pageUrl) === pageUrlKey(tabUrl))
-        : req.resources;
+      frameId === 0 ? req.resources.filter((r) => isCurrentPage(tabId, r.pageUrl ?? "")) : req.resources;
     if (resources.length === 0) return { added: 0 };
     const pageUrl = resources.find((r) => r.pageUrl)?.pageUrl || sender.tab?.url || "";
     // 旧页面的 content script 可能仍在运行：开关关闭时丢弃。
@@ -200,6 +215,15 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
     return { ok: addManifest(tabId, req.manifestUrl, req.manifest, req.pageUrl) };
   },
 
+  async hlsObserved(req, sender) {
+    const tabId = senderTabId(sender);
+    if (tabId === undefined || !(await sniffEnabled(tabId, req.pageUrl))) return { ok: false };
+    const playlist = normalizeHlsPlaylist(req.playlist);
+    if (!playlist || !isCurrentPage(tabId, req.pageUrl)) return { ok: false };
+    addHlsPlaylist(tabId, req.url, playlist, req.pageUrl);
+    return { ok: true };
+  },
+
   async bodyObserved(req, sender) {
     const tabId = senderTabId(sender);
     if (tabId === undefined || !(await sniffEnabled(tabId, req.pageUrl))) return { emitted: 0 };
@@ -210,10 +234,15 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
       return { emitted: 0 };
     }
     let emitted = 0;
-    for (const { rule, emits } of getEngine().extractFromBody(req.url, req.pageUrl, json)) {
+    const engine = getEngine();
+    for (const { rule, emits } of engine.extractFromBody(req.url, req.pageUrl, json)) {
       for (const emit of emits) {
         emitted += ingestEmit(tabId, req.pageUrl, sender.frameId, rule, emit, "fetch-intercept");
       }
+    }
+    // manifest 规则：站点接口里通用识别认不出的 DASH 结构，按规则给出的路径当清单处理
+    for (const node of engine.manifestsFromBody(req.url, req.pageUrl, json)) {
+      if (addManifest(tabId, req.url, parseDashJson(node, req.url), req.pageUrl)) emitted++;
     }
     return { emitted };
   },
@@ -244,11 +273,19 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
     return { ok: true };
   },
 
+  async serviceWorkerScope(req, sender) {
+    // SW 只能注册在同源路径下：以浏览器给出的帧来源为准，跨源上报直接拒绝
+    const frameOrigin = sender.origin ?? sender.url ?? "";
+    if (typeof req.scope !== "string" || !scopeBelongsTo(req.scope, frameOrigin)) return { ok: false };
+    rememberServiceWorkerScope(req.scope);
+    return { ok: true };
+  },
+
   async pageUrlChanged(req, sender) {
     const tabId = senderTabId(sender);
     // 只有顶层帧的 pageUrlChanged 才代表整页换址；子帧只做本地重置。
     if (tabId === undefined || !req.pageUrl || (sender.frameId ?? 0) !== 0) return { ok: false };
-    syncTabPageUrl(tabId, req.pageUrl, true);
+    syncTabPageUrl(tabId, req.pageUrl, req.kind);
     return { ok: true };
   },
 
@@ -368,13 +405,19 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
     const key = (url: string) => engine.dedupeKey(url, view.pageUrl);
     const resources = getResources(tabId);
     const manifests = getManifests(tabId);
-    const candidates = buildMediaCandidates(resources, {
+    const built = buildMediaCandidates(resources, {
       fallbackTitle: "Video",
       pageTitle: view.pageTitle,
       pageUrl: view.pageUrl,
       manifests,
+      hlsPlaylists: getHlsPlaylists(tabId),
+      mirrorGroups: engine.mirrorGroups(),
       key,
     });
+    const rows = [...view.playing, ...view.otherElements, ...view.unbound];
+    const builtIds = new Set(built.map((candidate) => candidate.id));
+    // 视图模型为直链 / 音视频配对元素合成的候选不在 buildMediaCandidates 里，一并导出。
+    const candidates = [...built, ...rows.map((row) => row.candidate).filter((c) => !builtIds.has(c.id))];
     return buildResourceDebugLog({
       source: "sidepanel",
       tabId,
@@ -382,7 +425,15 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
       pageTitle: view.pageTitle,
       resources,
       manifests,
+      hlsPlaylists: getHlsPlaylists(tabId),
       candidates,
+      elements: getElements(tabId),
+      bindings: new Map(
+        rows.map((row) => [
+          row.candidate.id,
+          { elementKey: row.elementKey, binding: row.binding, playingVariantId: row.playingVariantId },
+        ]),
+      ),
       key,
     });
   },

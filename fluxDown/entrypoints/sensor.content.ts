@@ -15,6 +15,7 @@ import type { ContentMessage } from "@/background/protocol";
 import {
   EV_CONFIG,
   EV_MEDIA,
+  EV_SHADOW,
   EV_REPORT,
   decodeDetail,
   encodeDetail,
@@ -38,6 +39,8 @@ import { createFloatButton, type FloatButtonController } from "@/ui/features/Flo
 import { normalizeDashManifest, parseDashManifestText } from "@/utils/dash-manifest";
 import { isHttpUrl } from "@/utils/media-sniff";
 import { sendAction } from "@/utils/messaging";
+import { isPageChange } from "@/utils/page-nav";
+import { normalizeHlsPlaylist } from "@/utils/hls-playlist";
 import type { ResourceMessagePayload } from "@/utils/resource-types";
 
 /** #288：单页面已上报资源数上限——长列表页无节制上报 / 扫描会导致页面卡顿。 */
@@ -352,6 +355,7 @@ export default defineContentScript({
       const trackingNeeded = next.sniff || next.floatButton || next.pageDot;
       if (trackingNeeded) tracker.start();
       else tracker.stop();
+      tracker.setHints(next.titles ?? [], next.floatExclude ?? []);
       refreshSniffState();
       domSniff.rerunDomRules();
       float?.setConfig(next);
@@ -385,7 +389,7 @@ export default defineContentScript({
               type: rules.classify(detail.url, detail.mime),
               mimeType: detail.mime,
               size: detail.size,
-              detectedBy: detail.via === "xhr" ? "xhr-intercept" : "fetch-intercept",
+              detectedBy: detail.via === "xhr" ? "xhr-intercept" : detail.via === "json" ? "api-scan" : "fetch-intercept",
             },
           ]);
           return;
@@ -415,17 +419,39 @@ export default defineContentScript({
             }),
           );
           return;
+        case "blob":
+          if (typeof detail.blobUrl === "string" && detail.blobUrl.startsWith("blob:") && isHttpUrl(detail.url)) {
+            tracker.setBlobSource(detail.blobUrl, detail.url);
+          }
+          return;
+        case "swScope":
+          if (typeof detail.scope === "string" && isHttpUrl(detail.scope)) {
+            swallow(sendAction({ action: "serviceWorkerScope", scope: detail.scope }));
+          }
+          return;
+        case "hls": {
+          const playlist = normalizeHlsPlaylist(detail.playlist);
+          if (!isHttpUrl(detail.url) || !playlist) return;
+          swallow(sendAction({ action: "hlsObserved", url: detail.url, playlist, pageUrl: location.href }));
+          return;
+        }
         case "preempt":
           if (detail.url) swallow(sendAction({ action: "preemptDownload", url: detail.url }));
           return;
-        case "pageUrl":
-          // 旧页面的待发队列属于上一个 URL：丢弃，避免 background 因旧 pageUrl 把 tab 状态改回去
-          navEpoch++;
-          domSniff.resetForNavigation();
-          tracker.resetSent();
-          if (top) swallow(sendAction({ action: "pageUrlChanged", pageUrl: location.href }));
+        case "pageUrl": {
+          const kind = detail.kind === "push" || detail.kind === "replace" ? detail.kind : "pop";
+          // replaceState 只改 query（如补追踪参数）不是换页：保留待发队列与已上报状态，
+          // 否则本页刚嗅探到的资源 / 内嵌清单会随 background 清空而丢失且不再补报。
+          if (isPageChange(kind, typeof detail.from === "string" ? detail.from : "", location.href)) {
+            // 旧页面的待发队列属于上一个 URL：丢弃，避免 background 因旧 pageUrl 把 tab 状态改回去
+            navEpoch++;
+            domSniff.resetForNavigation();
+            tracker.resetForNavigation();
+          }
+          if (top) swallow(sendAction({ action: "pageUrlChanged", pageUrl: location.href, kind }));
           void loadConfig();
           return;
+        }
       }
     }
     document.addEventListener(EV_REPORT, onReport);
@@ -438,6 +464,13 @@ export default defineContentScript({
     }
     // 事件 bubbles:false，只能在捕获阶段于 document 上接收
     document.addEventListener(EV_MEDIA, onMedia, true);
+
+    // 页面给已连接的元素挂了 shadow root（MAIN 的 attachShadow 钩子派发，composed 冒泡到 document）
+    function onShadow(event: Event): void {
+      const host = event.composedPath()[0];
+      if (host instanceof Element) tracker.observeShadowHost(host);
+    }
+    document.addEventListener(EV_SHADOW, onShadow, true);
 
     // 右键目标：video/audio 菜单在 srcUrl 不是 http(s) 时靠它回溯元素（#407）
     function onContextMenu(event: MouseEvent): void {

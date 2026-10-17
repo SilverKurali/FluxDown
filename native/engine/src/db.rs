@@ -3100,9 +3100,15 @@ impl Db {
 
     /// Insert default config values (only if not already set).
     pub async fn init_default_config(&self, default_save_dir: &str) -> Result<(), DbError> {
+        #[cfg(feature = "bt")]
         let default_sub_urls = crate::tracker_subscription::default_subscription_urls();
+        #[cfg(feature = "ed2k")]
         let default_ed2k_met_urls = crate::ed2k::server_subscription::default_server_met_urls();
-        let defaults: &[(&str, &str)] = &[
+        #[cfg_attr(
+            not(any(feature = "bt", feature = "ed2k")),
+            allow(unused_mut, clippy::useless_vec)
+        )]
+        let mut defaults: Vec<(&str, &str)> = vec![
             ("default_save_dir", default_save_dir),
             ("default_segments", "0"),
             // Auto 模式最大连接数上限：advisor 推荐值经此裁剪。
@@ -3117,12 +3123,6 @@ impl Db {
             // 全局 BT 上传限速（B/s）："0" = 不限。与 speed_limit_bytes
             // 解耦：后者只管下载，本键管 BT 上传（下载期上传 + 做种）。
             ("upload_limit_bytes", "0"),
-            // 启动自动续种："1" = 上次退出时仍在做种/排队的已完成任务，
-            // 重启后自动重新挂载做种；"0" = 保持停止态。
-            ("bt_auto_reseed", "1"),
-            // 完成后自动做种："1" = BT 任务下载完成后注册做种者继续上传；
-            // "0" = 完成即停止做种（librqbit 侧暂停）。完成时实时读库，热生效。
-            ("bt_seed_enabled", "1"),
             // 文件已存在时的处理方式："rename" = 自动编号改名（默认，现状）；
             // "overwrite" = 冲突仅来自磁盘上已存在的最终文件时保留原名，
             // 完成时覆盖旧文件（临时文件 / 并发任务预订仍照旧编号改名）。
@@ -3143,23 +3143,6 @@ impl Db {
             ("auto_check_update", "true"),
             // 匿名使用统计（每日活跃事件）；首装事件由 agent `analytics.rs` 一次性上报，不受此开关控制。
             ("analytics_enabled", "true"),
-            ("bt_enabled", "true"),
-            ("bt_enable_dht", "true"),
-            ("bt_enable_upnp", "true"),
-            ("bt_enable_utp", "true"),
-            ("bt_port_start", "6881"),
-            ("bt_port_end", "6891"),
-            // MSE 三态逃生开关（disabled/enabled/forced），无 UI，经 config API/CLI 可设。
-            ("bt_mse_mode", "enabled"),
-            ("bt_custom_trackers", ""),
-            // Tracker 订阅：默认启用，订阅社区流行的两个精选列表
-            // （XIU2/TrackersListCollection + ngosang/trackerslist）。
-            // cache 由订阅刷新流程写入，updated_at=0 表示从未更新。
-            ("bt_tracker_sub_enabled", "true"),
-            ("bt_tracker_sub_urls", &default_sub_urls),
-            ("bt_tracker_sub_cache", ""),
-            ("bt_tracker_sub_updated_at", "0"),
-            ("torrent_assoc_prompted", "false"),
             ("proxy_mode", "none"),
             ("proxy_type", "http"),
             ("proxy_host", ""),
@@ -3178,6 +3161,37 @@ impl Db {
             ("local_server_takeover_enabled", "true"),
             ("local_server_jsonrpc_enabled", "true"),
             ("local_server_api_enabled", "false"),
+        ];
+        // BitTorrent 相关默认值：没有 `bt` feature 的构建（iOS 商店）既不读也不暴露这些键。
+        #[cfg(feature = "bt")]
+        defaults.extend([
+            // 启动自动续种："1" = 上次退出时仍在做种/排队的已完成任务，
+            // 重启后自动重新挂载做种；"0" = 保持停止态。
+            ("bt_auto_reseed", "1"),
+            // 完成后自动做种："1" = BT 任务下载完成后注册做种者继续上传；
+            // "0" = 完成即停止做种（librqbit 侧暂停）。完成时实时读库，热生效。
+            ("bt_seed_enabled", "1"),
+            ("bt_enabled", "true"),
+            ("bt_enable_dht", "true"),
+            ("bt_enable_upnp", "true"),
+            ("bt_enable_utp", "true"),
+            ("bt_port_start", "6881"),
+            ("bt_port_end", "6891"),
+            // MSE 三态逃生开关（disabled/enabled/forced），无 UI，经 config API/CLI 可设。
+            ("bt_mse_mode", "enabled"),
+            ("bt_custom_trackers", ""),
+            // Tracker 订阅：默认启用，订阅社区流行的两个精选列表
+            // （XIU2/TrackersListCollection + ngosang/trackerslist）。
+            // cache 由订阅刷新流程写入，updated_at=0 表示从未更新。
+            ("bt_tracker_sub_enabled", "true"),
+            ("bt_tracker_sub_urls", &default_sub_urls),
+            ("bt_tracker_sub_cache", ""),
+            ("bt_tracker_sub_updated_at", "0"),
+            ("torrent_assoc_prompted", "false"),
+        ]);
+        // eD2K 相关默认值：同上，仅 `ed2k` feature 下播种。
+        #[cfg(feature = "ed2k")]
+        defaults.extend([
             // eD2K 服务器列表（逗号分隔 host:port）—— 用户手填/覆盖用。
             // 公共服务器高频轮换；订阅缓存（ed2k_server_sub_cache）是主要来源，
             // 二者在找源时合并。以下为写作时常见的长期在线服务器。
@@ -3203,8 +3217,8 @@ impl Db {
             ),
             ("ed2k_nodes_dat_cache", ""),
             ("ed2k_nodes_dat_updated_at", "0"),
-        ];
-        for (key, value) in defaults {
+        ]);
+        for (key, value) in &defaults {
             sqlx::query(
                 "INSERT INTO config (key, value) VALUES ($1, $2)
                  ON CONFLICT (key) DO NOTHING",
@@ -3215,7 +3229,9 @@ impl Db {
             .await?;
         }
         self.migrate_idle_file_scan_default_off().await?;
-        self.migrate_ed2k_server_sub_https().await
+        #[cfg(feature = "ed2k")]
+        self.migrate_ed2k_server_sub_https().await?;
+        Ok(())
     }
 
     /// 一次性迁移：`idle_file_scan` 曾以 "1" 播种却从未被 daemon 读取/暴露，
@@ -3242,6 +3258,7 @@ impl Db {
         Ok(())
     }
 
+    #[cfg(feature = "ed2k")]
     /// 一次性迁移：`ed2k_server_sub_urls` 曾以明文
     /// `http://upd.emule-security.org/server.met` 播种，该列表无校验和，
     /// 明文传输可被中间人替换；同一端点 https 内容一致，改为 https。
@@ -7283,6 +7300,7 @@ mod tests {
         close_test_db(&db, dir).await;
     }
 
+    #[cfg(feature = "ed2k")]
     #[tokio::test]
     async fn ed2k_server_list_default_parseable() {
         let (db, dir) = open_test_db().await;
@@ -8391,6 +8409,7 @@ mod tests {
         close_test_db(&db, dir).await;
     }
 
+    #[cfg(feature = "ed2k")]
     #[tokio::test]
     async fn ed2k_server_sub_legacy_http_migrates_once() {
         let (db, dir) = open_test_db().await;

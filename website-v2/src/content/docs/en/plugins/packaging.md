@@ -36,25 +36,33 @@ The plugin is extracted to `<data dir>/plugins/<identity>/`. Installing the same
 
 FluxDown's market is **a data format, not a service** — an index the app reads directly, with no backend and no account. The pieces:
 
-- **An index** — a Git-versioned JSON file listing plugins, versions and download mirrors. The default index lives at `zerx-lab/fluxdown-plugin-index` on GitHub; anyone can fork it and run their own. Users can add custom index sources in the app.
-- **Content addressing** — every published version records `contentHash = sha256(<the .fxplug file>)`. After downloading from any mirror, FluxDown recomputes the hash and rejects a mismatch. A compromised mirror cannot swap the payload.
-- **Multiple mirrors** — each version lists several download URLs (raw.githubusercontent, jsDelivr, GitHub Releases…). FluxDown tries them in order. Mirror URLs must be `https` and must not point at private/loopback/metadata addresses.
+- **An index** — a Git-versioned JSON catalog of plugins, versions and download mirrors. The default index lives at `zerx-lab/fluxdown-plugin-index` on GitHub; anyone can fork it and run their own. Users can add custom index sources in the app.
+- **Author-owned repositories** — each plugin lives in its author's own GitHub repository. The index only records which repository publishes which plugin identity; every GitHub Release of that repository is ingested automatically.
+- **Content addressing** — every published version records `contentHash = sha256(<the .fxplug file>)`. After downloading from any mirror, FluxDown recomputes the hash and rejects a mismatch. A compromised mirror cannot swap the payload, and a published version's bytes never change.
+- **Manifest match** — before installing, FluxDown checks that the package's manifest identity, version and permissions match the index entry, so the permissions you approve are exactly the ones the plugin gets.
 - **Rollback protection** — each index carries a monotonically increasing `sequence`; the app remembers the highest value seen per index and refuses an older one.
 
 v1 has no author-level cryptographic signatures — integrity rests on content addressing plus TLS plus Git history. The index schema reserves signature fields so they can be added later without breaking existing clients.
 
 ### Publishing a plugin
 
-1. Build and test your plugin locally (dev mode, see [Your first plugin](/docs/en/plugins/your-first-plugin/)).
-2. Zip it into a `.fxplug` and host the file somewhere permanently reachable over `https` — a GitHub Release is the usual choice.
-3. Compute the hash: `sha256sum my-plugin.fxplug`.
-4. Open a pull request against the index repository adding your plugin entry: identity, version, `contentHash`, mirror URLs, and a bumped `sequence`.
+1. Build and test your plugin locally (dev mode, see [Your first plugin](/docs/en/plugins/your-first-plugin/)), in your own public GitHub repository.
+2. Publish a GitHub Release (not a draft or pre-release) with exactly one `.fxplug` asset. `version` in `manifest.json` must be plain `MAJOR.MINOR.PATCH` and higher than any version already in the index.
+3. **Once**, open a pull request against the index repository that adds your plugin to `registry.json`:
 
-Once merged, the plugin appears in the in-app market on the next index refresh.
+   ```json
+   { "id": "author@name", "repo": "owner/repo", "tags": ["resolver", "video"] }
+   ```
+
+   `id` must equal the manifest `identity`. A bot downloads your latest release, runs the same checks the app applies at install time, and comments with the result, the permissions you declare and the URL patterns your plugin intercepts. A maintainer reviews and merges it.
+
+After that, **publishing an update is just publishing a new GitHub Release**. The index picks it up within an hour, with no pull request needed. If a release cannot be ingested (wrong identity, version not bumped, malformed manifest…), an issue labeled `stage-fail` is opened in the index repository and closed automatically once you fix it.
+
+The full rules are in the index repository's [README](https://github.com/zerx-lab/fluxdown-plugin-index#publishing-a-plugin).
 
 ### Yanking a version
 
-The index supports marking a version as yanked (for broken or malicious releases). Yanked versions are skipped by "install latest"; publish a fixed version with a higher version number the same way.
+Index maintainers can mark a version as yanked (for broken or malicious releases). Yanked versions are skipped by "install latest", and versions marked `vulnerable` or `malicious` are disabled where already installed. Publish a fixed version with a higher version number as a new release.
 
 ## Install APIs
 

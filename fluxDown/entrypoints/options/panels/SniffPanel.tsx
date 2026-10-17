@@ -40,6 +40,19 @@ export function SniffPanel(): JSX.Element | null {
           ]}
         />
       </SettingRow>
+      <SettingRow title={t("options.sniff.floatPosition")} desc={t("options.sniff.floatPositionDesc")}>
+        <Select<"top-right" | "top-left" | "bottom-right" | "bottom-left">
+          value={s.floatButtonPosition}
+          disabled={!s.showFloatingButton}
+          onChange={(v) => void updateSettings({ floatButtonPosition: v })}
+          options={[
+            { value: "top-right", label: t("options.sniff.positionTopRight") },
+            { value: "top-left", label: t("options.sniff.positionTopLeft") },
+            { value: "bottom-right", label: t("options.sniff.positionBottomRight") },
+            { value: "bottom-left", label: t("options.sniff.positionBottomLeft") },
+          ]}
+        />
+      </SettingRow>
       <ToggleRow
         title={t("options.sniff.images")}
         desc={t("options.sniff.imagesDesc")}

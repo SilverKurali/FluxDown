@@ -284,6 +284,12 @@ fn commands(labels: &Labels, cx: &App) -> Vec<PaletteItem> {
             crate::activity::toggle_theme,
         ),
         labels.command(
+            "cmd.customize_layout",
+            "chromeLayoutCustomize",
+            FluxIcon::GripVertical,
+            |_, cx| customize_layout(cx),
+        ),
+        labels.command(
             "cmd.check_update",
             "menuCheckForUpdates",
             FluxIcon::RotateCw,
@@ -320,7 +326,14 @@ fn settings_items(labels: &Labels, cx: &mut App) -> Vec<PaletteItem> {
     let desktop = Desktop::global(cx);
     let translator = desktop.translator.clone();
     let store = desktop.settings_store.clone();
-    let entries = search_index(&translator, &store, &crate::activity::toggles(), cx);
+    let referral_visible = desktop.referral_visibility.read(cx).visible();
+    let entries = search_index(
+        &translator,
+        &store,
+        &crate::activity::toggles(),
+        referral_visible,
+        cx,
+    );
     let root = labels.title(fluxdown_ui_i18n::keys::SETTINGS);
     entries
         .into_iter()
@@ -397,6 +410,20 @@ fn navigate_now(cx: &mut App, route: RouteId) {
     {
         shell.update(cx, |shell, cx| shell.navigate(route, cx));
     }
+}
+
+/// 主窗口到前台并进入 chrome 布局编辑模式。
+fn customize_layout(cx: &mut App) {
+    cx.defer(|cx| {
+        crate::windows::main::reveal(cx);
+        if let Some(shell) = Desktop::global(cx)
+            .main_shell
+            .as_ref()
+            .and_then(gpui::WeakEntity::upgrade)
+        {
+            shell.update(cx, |shell, cx| shell.set_editing(true, cx));
+        }
+    });
 }
 
 /// 平台快捷键提示：macOS `⌘N`，其他平台 `Ctrl+N`。

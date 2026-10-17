@@ -399,6 +399,10 @@ impl GatewayService {
             method::AGENT_DEVICE_DELETE => {
                 self.device_delete(params_or_empty(request.params)).await
             }
+            method::AGENT_DEVICE_DISCONNECT => {
+                self.device_disconnect(params_or_empty(request.params))
+                    .await
+            }
             method::AGENT_PLAN_LIST => cloud_value(self.cloud.plans().await),
             method::AGENT_ORDER_CREATE => cloud_value(
                 self.cloud
@@ -998,6 +1002,29 @@ impl GatewayService {
         Ok(value)
     }
 
+    /// 让同账号另一台在线设备下线以释放在线名额。成功后本机若正处于在线名额受限的等待中，
+    /// 立即重连任务通道与配置同步，不必等下一个 30 秒重试。
+    async fn device_disconnect(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        let epoch = self.cloud.request_epoch();
+        let id = required_string(&params, "id")?;
+        self.cloud
+            .at_epoch(epoch)
+            .disconnect_device(&id)
+            .await
+            .map_err(cloud_error_data)?;
+        let snapshot = agent_snapshot(&self.events)?;
+        if snapshot.cloud_connection.state != fluxdown_protocol::CloudConnectionState::Connected {
+            self.remote.request_reconnect();
+        }
+        if !snapshot.sync.connected {
+            self.sync.request_reconnect();
+        }
+        Ok(serde_json::json!({"ok": true}))
+    }
+
     async fn order_get(
         &self,
         params: serde_json::Value,
@@ -1576,6 +1603,8 @@ fn remote_error_data(error: RemoteError) -> RpcErrorData {
         RemoteError::Json(error) => internal_error("remote task response", error),
         RemoteError::State(error) => internal_error("agent state", error),
         RemoteError::Protocol(message) => internal_error("remote task protocol", message),
+        RemoteError::Kicked => RpcErrorData::new(ApplicationErrorCode::Conflict, false)
+            .with_reason(fluxdown_protocol::ErrorReason::OnlineDeviceLimit),
     }
 }
 

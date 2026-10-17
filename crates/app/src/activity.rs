@@ -51,6 +51,17 @@ impl ActivityEntry {
         }
     }
 
+    /// chrome 布局里的条目 id：路由沿用路由标识，动作取稳定短名（与 Web 同名）。
+    pub(crate) const fn layout_id(self) -> &'static str {
+        match self {
+            Self::Downloads => DOWNLOADS_ROUTE.as_str(),
+            Self::Rss => RSS_ROUTE.as_str(),
+            Self::Webhooks => WEBHOOKS_ROUTE.as_str(),
+            Self::Account => "account",
+            Self::Settings => "settings",
+        }
+    }
+
     /// 活动栏按钮与命令面板共用的标题文案键。
     pub(crate) const fn label_key(self) -> &'static str {
         match self {

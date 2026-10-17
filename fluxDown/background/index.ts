@@ -18,6 +18,7 @@ import {
   syncDownloadShelfState,
 } from "./intercept";
 import { createContextMenus, installMenus } from "./menus";
+import { downloadPlayingMedia } from "./downloads";
 import { installMessages } from "./messages";
 import { notify } from "./notify";
 import { installPorts } from "./ports";
@@ -29,6 +30,7 @@ import {
   onSettingsChanged,
 } from "./settings-cache";
 import { installSniff } from "./sniff";
+import { loadServiceWorkerScopes } from "./sw-scopes";
 import { allFrames, installTabState } from "./tab-state";
 import { installTaskListeners } from "./tasks";
 import { updateIcon } from "./toolbar";
@@ -76,6 +78,8 @@ export function startBackground(): void {
   installMessages();
   installPorts();
   restoreBreakerState();
+  // 拦截同步路径需要 SW 作用域登记表就绪，启动即恢复
+  void loadServiceWorkerScopes();
 
   onSettingsChanged(applyInterceptState);
   onSettingsChanged(broadcastPageConfigChanged);
@@ -84,6 +88,10 @@ export function startBackground(): void {
 
   // 快捷键切换拦截开关（替代原来的 Alt+Click 绕过机制）
   browser.commands.onCommand.addListener(async (command) => {
+    if (command === "download-playing-media") {
+      await downloadPlayingMedia();
+      return;
+    }
     if (command !== "toggle-intercept") return;
     const settings = await loadSettings();
     const enabled = !settings.enabled;

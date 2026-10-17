@@ -580,7 +580,7 @@ public enum AccountRules {
         case "registrationIncomplete": "accountErrorRegistrationIncomplete"
         case "mailNotConfigured": "errReasonMailNotConfigured"
         case "deviceLimit": "accountErrorDeviceLimit"
-        case "syncDeviceLimit": "cloudSyncErrorDeviceLimit"
+        case "onlineDeviceLimit": "cloudSyncErrorOnlineLimit"
         case "deviceUntrusted": context == .sync ? "cloudSyncErrorDeviceUntrusted" : "accountErrorDeviceUntrusted"
         case "sessionExpired": "errReasonSessionExpired"
         case "cloudUnreachable": context == .sync ? "cloudSyncErrorNetwork" : "accountErrorNetwork"

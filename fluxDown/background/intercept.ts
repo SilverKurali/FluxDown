@@ -10,12 +10,17 @@
  *   在限定时间内未处理时接管；Firefox 无第二层，这里是唯一路径（另有 blocking
  *   webRequest 从源头取消导航下载，见 issue #21）。
  *
+ * 只能由浏览器完成的下载（本地 scheme、页面 Service Worker 合成的 http(s) 响应）三层都
+ * 放行，判定见 utils/download-source.ts。
+ *
  * #527：拦截关闭后必须真正 removeListener 把这些事件让给其他扩展
  * （脚本猫 / PDM / IDM 等），由 setInterceptListenersActive 统一增删。
  */
 import { browser } from "wxt/browser";
 import type { Browser } from "wxt/browser";
 import { cancelBeforeFilenameResolution } from "@/utils/download-cancellation";
+import { browserOnlyReason, isReplayableUrl } from "@/utils/download-source";
+import type { NetworkEvidence, ServiceWorkerScopes } from "@/utils/download-source";
 import {
   dispositionNeedsPageCharset,
   extractCleanFilename,
@@ -27,8 +32,10 @@ import { shouldIntercept } from "@/utils/settings";
 import type { DownloadItemInfo } from "@/utils/settings";
 import { hasActiveBypass, isAppKnownDown } from "./breaker";
 import { sleep } from "./notify";
+import { sawNetworkRequest } from "./request-cache";
 import { fallbackAfterSendFailure, sendToFluxDown } from "./sender";
 import { getCachedProfiles, getCachedSettings, peekCachedProfiles, peekCachedSettings } from "./settings-cache";
+import { loadServiceWorkerScopes, peekServiceWorkerScopes } from "./sw-scopes";
 
 // 响应头缓存 —— 当 HTTP 响应指示"这是一个下载"时，缓存其元数据
 // 这是第三层兜底拦截的关键数据来源
@@ -120,7 +127,8 @@ export function resolveResponseDispositionFilename(
 }
 
 const downloadItemCache = new Map<number, Browser.downloads.DownloadItem>();
-const handledDownloads = new Map<number, "primary" | "fallback">();
+// primary / fallback：该层已接管；released：主拦截已按完整信息放行，兜底层不再重判。
+const handledDownloads = new Map<number, "primary" | "fallback" | "released">();
 // 预抢占 URL 表：URL → {expiry: 过期时间戳, ruleId: DNR 规则 ID}
 // 当 AJAX 拦截器在浏览器发起 CDN GET 之前检测到一次性下载 URL 时填入。
 // onDeterminingFilename 检查此表，避免重复发送给 FluxDown。
@@ -132,6 +140,27 @@ export function markPreempted(url: string): void {
   setTimeout(() => {
     preemptedUrls.delete(url);
   }, 30_000);
+}
+
+// Firefox 判为浏览器内合成的导航响应（SW 作用域内、无服务器 IP、非缓存）：URL → 过期时间。
+const syntheticResponses = new Map<string, number>();
+const SYNTHETIC_TTL_MS = 60_000;
+
+function markSynthetic(url: string): void {
+  syntheticResponses.set(url, Date.now() + SYNTHETIC_TTL_MS);
+  setTimeout(() => syntheticResponses.delete(url), SYNTHETIC_TTL_MS);
+}
+
+function evidenceOf(url: string): NetworkEvidence {
+  if ((syntheticResponses.get(url) ?? 0) > Date.now()) return "synthetic";
+  return sawNetworkRequest(url) ? "network" : "none";
+}
+
+/** 下载只能由浏览器完成（本地 scheme / SW 合成）时返回 true 并记录原因。 */
+function isBrowserOnly(urls: readonly (string | undefined)[], scopes: ServiceWorkerScopes): boolean {
+  const reason = browserOnlyReason(urls, scopes, evidenceOf);
+  if (reason) console.log("[FluxDown] leaving download to the browser:", reason, urls);
+  return reason !== null;
 }
 
 // Firefox 不支持 onDeterminingFilename，兜底层是唯一拦截路径，
@@ -227,6 +256,11 @@ async function startFallbackInterception(
 ) {
   const url = originalItem.url;
 
+  // 总开关 / 绕过令牌 / 熔断在等待前同步判定：回退出来的浏览器下载、熔断期内的下载
+  // 不必再轮询元数据。设置缓存未就绪时留给后续路径判定。
+  const cachedSettings = peekCachedSettings();
+  if ((cachedSettings && !cachedSettings.enabled) || hasActiveBypass(url) || isAppKnownDown()) return;
+
   console.log("[FluxDown] startFallbackInterception:", {
     id: downloadId,
     url,
@@ -307,6 +341,10 @@ async function handleResponseCacheHit(
     return;
   }
 
+  // 优先使用 finalUrl（重定向后的真实 URL）
+  const fallbackAUrl = (originalItem as any).finalUrl || url;
+  if (isBrowserOnly([url, fallbackAUrl], await loadServiceWorkerScopes())) return;
+
   const dispositionFilename = await resolveResponseDispositionFilename(rc);
   const itemInfo: DownloadItemInfo = {
     url,
@@ -329,8 +367,6 @@ async function handleResponseCacheHit(
 
   // Bug R2-5 修复：用 try/finally 确保无论 executeFallbackIntercept 是否抛出，
   // responseDownloadCache 中对应 URL 的条目都会被清理，防止再次下载同 URL 命中旧缓存
-  // 优先使用 finalUrl（重定向后的真实 URL）
-  const fallbackAUrl = (originalItem as any).finalUrl || url;
   try {
     await executeFallbackIntercept(
       downloadId,
@@ -396,16 +432,18 @@ async function handleDownloadMetaHit(
   // App 熔断期内跳过拦截，让浏览器原生下载，避免反复"发送失败→回退"弹窗。
   if (isAppKnownDown()) return;
 
-  const intercept = shouldIntercept(itemInfo, settings, await getCachedProfiles());
-  console.log("[FluxDown] Path B shouldIntercept:", intercept, itemInfo);
-  if (!intercept) return;
-  if (handledDownloads.has(downloadId)) return;
-
   // 优先使用 finalUrl（重定向后的真实 URL）
   const fallbackDownloadUrl =
     (freshItem as any).finalUrl ||
     (originalItem as any).finalUrl ||
     itemInfo.url;
+  if (isBrowserOnly([url, fallbackDownloadUrl], await loadServiceWorkerScopes())) return;
+
+  const intercept = shouldIntercept(itemInfo, settings, await getCachedProfiles());
+  console.log("[FluxDown] Path B shouldIntercept:", intercept, itemInfo);
+  if (!intercept) return;
+  if (handledDownloads.has(downloadId)) return;
+
   await executeFallbackIntercept(
     downloadId,
     fallbackDownloadUrl,
@@ -417,13 +455,11 @@ async function handleDownloadMetaHit(
 }
 
 /**
- * 执行兜底拦截：cancel + erase + 发送到 FluxDown
+ * 执行兜底拦截：cancel → 发送到 FluxDown，抹除记录在后台进行。
  *
- * 策略：先取消浏览器下载，再发送到 FluxDown。
- * 原因：如果先发送再取消，异步等待期间浏览器下载持续进行，
- * 小文件可能在 cancel 前已完成，导致"双下载"（用户同时看到
- * FluxDown 下载和浏览器已完成的下载）。Firefox 尤为严重，
- * 因为它没有 onDeterminingFilename，兜底层是唯一拦截路径。
+ * 先取消再发送：先发送会让浏览器下载在异步等待期间继续，小文件可能在 cancel 前完成，
+ * 导致「双下载」；Firefox 没有 onDeterminingFilename，兜底层是唯一拦截路径，尤为明显。
+ * 发送只需取消已生效，不必等抹除完成（抹除只清下载列表残留，Firefox 上需轮询等终态再重试确认）。
  * 若发送失败，通过 fallbackToBrowserDownload 重新发起浏览器下载。
  */
 async function executeFallbackIntercept(
@@ -442,9 +478,12 @@ async function executeFallbackIntercept(
     itemInfo.mime,
   );
 
-  // 取消浏览器下载并抹除记录，防止双下载 + 残留失败/已取消记录（见 issue #21）。
-  // 详见 cancelAndErase：Firefox 需等记录落终态再 erase 并重试确认。
-  await cancelAndErase(downloadId);
+  try {
+    await browser.downloads.cancel(downloadId);
+  } catch (e) {
+    console.warn("[FluxDown] executeFallbackIntercept: cancel failed:", e);
+  }
+  void eraseWhenSettled(downloadId);
 
   // 再发送到 FluxDown
   let sendOk = false;
@@ -510,6 +549,11 @@ const handleDeterminingFilename: DeterminingFilenameListener = (
     suggest();
   };
   const releaseToBrowser = () => {
+    handledDownloads.set(downloadItem.id, "released");
+    resolveFilename();
+  };
+  // 放行但不下最终结论（元数据不全 / 出错）：撤掉占位，兜底层仍可接手
+  const handBackToFallback = () => {
     handledDownloads.delete(downloadItem.id);
     resolveFilename();
   };
@@ -609,7 +653,7 @@ const handleDeterminingFilename: DeterminingFilenameListener = (
             ),
         );
       } else if (!filenameResolved) {
-        releaseToBrowser();
+        handBackToFallback();
       }
     }
   };
@@ -617,14 +661,21 @@ const handleDeterminingFilename: DeterminingFilenameListener = (
   const resolveWithLoadedSettings = async () => {
     try {
       const settings = await getCachedSettings();
-      if (!settings.enabled || hasActiveBypass(url) || isAppKnownDown()) {
+      if (
+        !settings.enabled ||
+        hasActiveBypass(url) ||
+        isAppKnownDown() ||
+        isBrowserOnly([url, downloadUrl], await loadServiceWorkerScopes())
+      ) {
         releaseToBrowser();
         return;
       }
 
       const { itemInfo, referrer } = collectItemInfo();
       if (!shouldIntercept(itemInfo, settings, await getCachedProfiles())) {
-        releaseToBrowser();
+        // 元数据不全时的「不拦截」不是最终结论：留给兜底层拿到完整元数据后重判
+        if (itemInfo.mime || itemInfo.filename) releaseToBrowser();
+        else handBackToFallback();
         return;
       }
 
@@ -642,15 +693,15 @@ const handleDeterminingFilename: DeterminingFilenameListener = (
         "[FluxDown] failed while resolving interception settings:",
         error,
       );
-      if (!filenameResolved) releaseToBrowser();
+      if (!filenameResolved) handBackToFallback();
     } finally {
       downloadItemCache.delete(downloadItem.id);
     }
   };
 
-  // FluxDown cannot replay blob/data sources; do not compete with other
-  // download extensions for their filename decision.
-  if (url.startsWith("blob:") || url.startsWith("data:")) {
+  // 本地 scheme（blob:/data:/filesystem: 等）引擎无法重放：直接放行，且不占用
+  // 文件名决定权，免得与其它下载扩展竞争。
+  if (!isReplayableUrl(url) || !isReplayableUrl(downloadUrl)) {
     resolveFilename();
     return;
   }
@@ -697,11 +748,13 @@ const handleDeterminingFilename: DeterminingFilenameListener = (
 
   const cachedSettings = peekCachedSettings();
   const cachedProfiles = peekCachedProfiles();
-  if (cachedSettings !== null && cachedProfiles !== null) {
+  const cachedScopes = peekServiceWorkerScopes();
+  if (cachedSettings !== null && cachedProfiles !== null && cachedScopes !== null) {
     if (
       !cachedSettings.enabled ||
       hasActiveBypass(url) ||
-      isAppKnownDown()
+      isAppKnownDown() ||
+      isBrowserOnly([url, downloadUrl], cachedScopes)
     ) {
       releaseToBrowser();
       downloadItemCache.delete(downloadItem.id);
@@ -741,20 +794,14 @@ const handleDeterminingFilename: DeterminingFilenameListener = (
 };
 
 /**
- * 健壮地取消并抹除一条浏览器下载记录（Firefox 关键路径，见 issue #21）。
+ * 抹除一条已取消的浏览器下载记录（发送不依赖它，由调用方放到后台）。
  *
  * Firefox 的 downloads.cancel() 返回的 Promise 会在状态真正落到 interrupted
  * 之前 resolve，此时立刻 erase 常常删不掉记录，浏览器下载器残留一条"已取消"
- * 记录。正确做法：cancel 后轮询 search 等记录进入终态（interrupted/complete）
- * 再 erase，并在 erase 后确认记录确实消失，未消失则重试。
+ * 记录。正确做法：轮询 search 等记录进入终态（interrupted/complete）再 erase，
+ * 并在 erase 后确认记录确实消失，未消失则重试。
  */
-async function cancelAndErase(downloadId: number): Promise<void> {
-  try {
-    await browser.downloads.cancel(downloadId);
-  } catch (e) {
-    console.warn("[FluxDown] cancelAndErase: cancel failed:", e);
-  }
-
+async function eraseWhenSettled(downloadId: number): Promise<void> {
   // 等记录落到终态（interrupted/complete），最多等 ~1s；
   // 记录已消失（length===0）说明已被抹除，直接返回。
   const settleDeadline = Date.now() + 1000;
@@ -775,7 +822,7 @@ async function cancelAndErase(downloadId: number): Promise<void> {
     try {
       await browser.downloads.erase({ id: downloadId });
     } catch (e) {
-      console.warn("[FluxDown] cancelAndErase: erase failed:", e);
+      console.warn("[FluxDown] eraseWhenSettled: erase failed:", e);
     }
     try {
       const remain = await browser.downloads.search({ id: downloadId });
@@ -786,7 +833,7 @@ async function cancelAndErase(downloadId: number): Promise<void> {
     await sleep(100);
   }
   console.warn(
-    "[FluxDown] cancelAndErase: record still present after retries:",
+    "[FluxDown] eraseWhenSettled: record still present after retries:",
     downloadId,
   );
 }
@@ -896,11 +943,13 @@ const onDownloadHeadersBlocking = (
     return undefined;
   }
 
-  // 冷启动首个下载时 settings / 站点配置缓存可能为 null：保守放行，异步预热缓存
+  // 冷启动首个下载时 settings / 站点配置 / SW 作用域可能尚未就绪：保守放行（交给兜底层），
+  // 异步预热
   const settings = peekCachedSettings();
   const profiles = peekCachedProfiles();
-  if (!settings || !profiles) {
-    Promise.all([getCachedSettings(), getCachedProfiles()]).catch(() => {});
+  const scopes = peekServiceWorkerScopes();
+  if (!settings || !profiles || !scopes) {
+    Promise.all([getCachedSettings(), getCachedProfiles(), loadServiceWorkerScopes()]).catch(() => {});
     return undefined;
   }
   if (!settings.enabled) return undefined;
@@ -924,6 +973,14 @@ const onDownloadHeadersBlocking = (
     referrerUrl: referrer,
   };
   if (!shouldIntercept(itemInfo, settings, profiles)) return undefined;
+
+  // SW 作用域内的响应既无服务器 IP 又非缓存：由页面 SW 在浏览器内合成，引擎无法重放。
+  // 记下判定，兜底层看到同一 URL 的下载项时同样放行。
+  if (scopes.covers(details.url) && !details.ip && !details.fromCache) {
+    markSynthetic(details.url);
+    console.log("[FluxDown] Firefox blocking: service-worker response, leaving to browser:", details.url);
+    return undefined;
+  }
 
   // 命中：同步取消该请求（浏览器不创建下载项），异步发送到 FluxDown
   console.log("[FluxDown] Firefox blocking intercept (cancel at source):", {
@@ -993,11 +1050,11 @@ const handleDownloadCreated = (downloadItem: Browser.downloads.DownloadItem): vo
     filename: downloadItem.filename,
   });
 
+  // 本地 scheme（blob:/data:/filesystem: 等）引擎无法重放，不缓存也不启动兜底
+  if (!isReplayableUrl(url)) return;
+
   // 缓存 downloadItem 信息，onDeterminingFilename 会用到
   downloadItemCache.set(downloadId, downloadItem);
-
-  // 跳过 blob 和 data URL
-  if (url.startsWith("blob:") || url.startsWith("data:")) return;
 
   // 启动兜底计时器
   // 给 onDeterminingFilename 一个处理窗口，超时后由 onCreated 兜底

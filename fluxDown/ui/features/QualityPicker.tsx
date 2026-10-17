@@ -49,24 +49,30 @@ export function QualityPicker(props: QualityPickerProps): JSX.Element {
     <div class="fd-qp" role="menu">
       {props.rows.map((row) => (
         <div class="fd-qp-group" key={row.candidate.id}>
-          {props.rows.length > 1 ? <div class="fd-qp-title">{row.candidate.title}</div> : null}
+          {/* 标题单行截断，悬停显示完整名称 */}
+          <div class="fd-qp-title" title={row.candidate.title}>
+            {row.candidate.title}
+          </div>
+          {row.candidate.protected ? <div class="fd-qp-note">{t("float.protectedHint")}</div> : null}
           {row.candidate.variants.map((v) => {
             const playing = row.playingVariantId === v.id;
+            const meta = [
+              v.codec,
+              v.audioUrl ? t("float.audioVideo") : "",
+              v.fileSize && v.fileSize > 0 ? formatBytes(v.fileSize) : "",
+            ].filter(Boolean).join(" · ");
             return (
               <button
                 type="button"
                 class={`fd-qp-item${playing ? " fd-playing" : ""}`}
                 role="menuitem"
                 key={v.id}
-                disabled={busy || !row.candidate.downloadable}
+                title={`${row.candidate.title}\n${variantLabel(t, v)}${meta ? ` · ${meta}` : ""}`}
+                disabled={busy || !row.candidate.downloadable || row.candidate.protected === true}
                 onClick={() => void pick(row.candidate.id, v.id)}
               >
                 <span class="fd-qp-label">{variantLabel(t, v)}</span>
-                <span class="fd-qp-meta">
-                  {[v.codec, v.fileSize && v.fileSize > 0 ? formatBytes(v.fileSize) : ""]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </span>
+                <span class="fd-qp-meta">{meta}</span>
                 {playing ? <span class="fd-qp-playing">{t("list.playing")}</span> : null}
               </button>
             );

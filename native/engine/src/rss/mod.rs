@@ -2,7 +2,7 @@
 //!
 //! # 形状
 //!
-//! 与 BT tracker 订阅（[`crate::tracker_subscription`]）、插件惰性解析同款的
+//! 与 BT tracker 订阅（`tracker_subscription`，仅 `bt` feature）、插件惰性解析同款的
 //! 「**actor tick → 纯函数判定 → off-actor 抓取 → mpsc 回流 → actor 落库**」
 //! 结构：
 //!
@@ -215,7 +215,7 @@ impl RssDownloadPlan {
     /// ```
     #[must_use]
     pub fn is_torrent_file(&self) -> bool {
-        if crate::bt_downloader::is_magnet_url(&self.url) {
+        if crate::bt_config::is_magnet_url(&self.url) {
             return false;
         }
         self.enclosure_type == TORRENT_MIME || url_looks_like_torrent(&self.url)
@@ -226,7 +226,7 @@ impl RssDownloadPlan {
 /// 字样外，认两种不含扩展名的常见种子下载形态：NexusPHP 的
 /// `download.php?…passkey=…` 与 Jackett 的 `/dl/<indexer>/?jackett_apikey=…`。
 fn url_looks_like_torrent(url: &str) -> bool {
-    if crate::bt_downloader::is_magnet_url(url) {
+    if crate::bt_config::is_magnet_url(url) {
         return false;
     }
     let lowered = url.to_ascii_lowercase();

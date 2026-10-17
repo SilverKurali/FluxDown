@@ -5,6 +5,7 @@
  * 500 ms 节流后以 `mediaElementState` 交给 background；同时向浮钮提供矩形命中、
  * 当前播放元素等查询。元素发现来源：初始扫描、MutationObserver、EV_MEDIA 事件目标。
  */
+import { browser } from "wxt/browser";
 import type { ElementState } from "@/background/protocol";
 import type { MediaDetail } from "./bridge";
 
@@ -28,6 +29,8 @@ const MEDIA_EVENTS = [
   "loadedmetadata",
   "resize",
   "timeupdate",
+  // EME：媒体数据带加密初始化信息（DRM 内容），下载得到的是密文
+  "encrypted",
 ] as const;
 
 export interface TrackedMedia {
@@ -42,6 +45,8 @@ export interface TrackedMedia {
 
 interface Item extends TrackedMedia {
   bindings: MediaDetail | null;
+  /** 收到过 `encrypted` 事件（当前来源受 DRM 保护）。 */
+  encrypted: boolean;
   lastTick: number;
   lastReportedPlayedAt: number;
   lastSentJson: string;
@@ -67,6 +72,60 @@ export function isMediaTag(node: unknown): node is HTMLMediaElement {
   return tag === "VIDEO" || tag === "AUDIO";
 }
 
+/** 媒体元素可作为浮钮目标的最小尺寸：视频按画面，音频按控件条（通常 300×54 左右）。 */
+export function minTargetSize(tag: "video" | "audio"): { w: number; h: number } {
+  return tag === "video" ? { w: MIN_TARGET_W, h: MIN_TARGET_H } : { w: MIN_TARGET_W, h: 24 };
+}
+
+/**
+ * 元素的 shadow root（含 closed）：内容脚本可用 `chrome.dom.openOrClosedShadowRoot`（Chrome）或
+ * `openOrClosedShadowRoot`（Firefox）读取页面自身拿不到的 closed root。
+ */
+function shadowRootOf(el: Element): ShadowRoot | null {
+  const dom = browser.dom;
+  if (dom && typeof dom.openOrClosedShadowRoot === "function") {
+    try {
+      const root = dom.openOrClosedShadowRoot(el as HTMLElement);
+      if (root instanceof ShadowRoot) return root;
+      return null;
+    } catch {
+      return el.shadowRoot;
+    }
+  }
+  if ("openOrClosedShadowRoot" in el && el.openOrClosedShadowRoot instanceof ShadowRoot) return el.openOrClosedShadowRoot;
+  return el.shadowRoot;
+}
+
+/** 播放元素标题的最大长度（候选名 / 文件名用，过长的描述截断）。 */
+const MAX_TITLE_LEN = 200;
+
+function cleanText(text: string | null | undefined): string {
+  return (text ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_TITLE_LEN);
+}
+
+/** `a` 与 `b` 最近公共祖先的深度（越大越近）；跨 shadow 边界按宿主继续向上。 */
+function commonDepth(ancestorsOfA: Map<Node, number>, b: Node): number {
+  let node: Node | null = b;
+  while (node) {
+    const depth = ancestorsOfA.get(node);
+    if (depth !== undefined) return depth;
+    node = node.parentNode ?? (node instanceof ShadowRoot ? node.host : null);
+  }
+  return -1;
+}
+
+function ancestorDepths(el: Node): Map<Node, number> {
+  const chain: Node[] = [];
+  let node: Node | null = el;
+  while (node) {
+    chain.push(node);
+    node = node.parentNode ?? (node instanceof ShadowRoot ? node.host : null);
+  }
+  const out = new Map<Node, number>();
+  chain.reverse().forEach((n, depth) => out.set(n, depth));
+  return out;
+}
+
 export class MediaTracker {
   private readonly frameUid = makeFrameUid();
   private seq = 0;
@@ -80,9 +139,13 @@ export class MediaTracker {
   private readonly addedNodes = new Set<Element>();
   private sawRemoval = false;
   private io: IntersectionObserver | null = null;
+  private readonly blobSources = new Map<string, string>();
   private ro: ResizeObserver | null = null;
   private mo: MutationObserver | null = null;
   private started = false;
+  private readonly shadowRoots = new WeakSet<ShadowRoot>();
+  private titleRules: { selector: string; attr?: string }[] = [];
+  private floatExclude: string[] = [];
 
   constructor(private readonly opts: MediaTrackerOptions) {}
 
@@ -92,6 +155,7 @@ export class MediaTracker {
     if (this.started) return;
     this.started = true;
     this.scan(document);
+    this.scanShadowHosts(document);
     document.addEventListener("pointerdown", this.onPointerDown, { capture: true, passive: true });
     this.mo = new MutationObserver((records) => {
       for (const r of records) {
@@ -101,6 +165,8 @@ export class MediaTracker {
       this.scheduleMutationFlush();
     });
     this.mo.observe(document.documentElement, { childList: true, subtree: true });
+    // 启动前已挂上的 shadow root 在 scanShadowHosts 里补观察（它在 mo 创建前执行，这里重扫一次）
+    this.scanShadowHosts(document);
   }
 
   stop(): void {
@@ -127,6 +193,80 @@ export class MediaTracker {
     for (const el of root.querySelectorAll("video,audio")) this.adopt(el as HTMLMediaElement);
   }
 
+  /** 遍历 `root` 下已有的 shadow 宿主（启动时一次；之后由 attachShadow 通知增量发现）。 */
+  private scanShadowHosts(root: ParentNode): void {
+    for (const el of root.querySelectorAll("*")) {
+      const shadow = shadowRootOf(el);
+      if (shadow) this.observeShadowRoot(shadow);
+    }
+  }
+
+  /** 页面在 `host` 上创建了 shadow root（MAIN world 的 attachShadow 钩子通知）。 */
+  observeShadowHost(host: Element): void {
+    const shadow = shadowRootOf(host);
+    if (shadow) this.observeShadowRoot(shadow);
+  }
+
+  private observeShadowRoot(shadow: ShadowRoot): void {
+    if (!this.mo || this.shadowRoots.has(shadow)) return;
+    this.shadowRoots.add(shadow);
+    this.mo.observe(shadow, { childList: true, subtree: true });
+    this.scan(shadow);
+    this.scanShadowHosts(shadow);
+  }
+
+  /** page 规则：标题来源与浮钮排除。 */
+  setHints(titles: { selector: string; attr?: string }[], floatExclude: string[]): void {
+    this.titleRules = titles;
+    this.floatExclude = floatExclude;
+    for (const item of this.items.values()) this.markDirty(item);
+  }
+
+  /** 元素是否位于 page 规则声明的浮钮排除容器内（背景 / 广告 / 预览视频）。 */
+  isFloatExcluded(el: Element): boolean {
+    return this.floatExclude.some((selector) => {
+      try {
+        return el.closest(selector) !== null;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /**
+   * 播放元素的标题：page 规则选择器（取离元素最近的匹配节点）> 正在播放时的 Media Session 标题 >
+   * 元素自身 title / aria-label。都没有返回空串（候选沿用页面标题）。
+   */
+  private titleOf(item: Item): string {
+    if (this.titleRules.length > 0) {
+      const ancestors = ancestorDepths(item.el);
+      let best = "";
+      let bestDepth = -1;
+      for (const rule of this.titleRules) {
+        let nodes: NodeListOf<Element>;
+        try {
+          nodes = document.querySelectorAll(rule.selector);
+        } catch {
+          continue;
+        }
+        for (const node of nodes) {
+          const text = cleanText(rule.attr ? node.getAttribute(rule.attr) : node.textContent);
+          const depth = commonDepth(ancestors, node);
+          if (text && depth > bestDepth) {
+            best = text;
+            bestDepth = depth;
+          }
+        }
+      }
+      if (best) return best;
+    }
+    if (item.playing) {
+      const session = cleanText(navigator.mediaSession?.metadata?.title);
+      if (session) return session;
+    }
+    return cleanText(item.el.getAttribute("title") || item.el.getAttribute("aria-label"));
+  }
+
   private scheduleMutationFlush(): void {
     if (this.mutationTimer !== undefined) return;
     this.mutationTimer = window.setTimeout(() => {
@@ -136,6 +276,10 @@ export class MediaTracker {
       for (const node of added) {
         if (isMediaTag(node)) this.adopt(node);
         else if (node.childElementCount > 0) this.scan(node);
+        // 构造时挂的 shadow root（宿主当时未连接，MAIN 不会派发通知）在插入文档时补观察
+        const own = shadowRootOf(node);
+        if (own) this.observeShadowRoot(own);
+        if (node.childElementCount > 0) this.scanShadowHosts(node);
       }
       if (this.sawRemoval) {
         this.sawRemoval = false;
@@ -169,6 +313,7 @@ export class MediaTracker {
       lastTick: 0,
       lastReportedPlayedAt: 0,
       lastSentJson: "",
+      encrypted: false,
       handler,
     };
     this.items.set(key, item);
@@ -239,7 +384,11 @@ export class MediaTracker {
     }
     if (playing) item.lastPlayedAt = now;
     item.playing = playing;
-    if (type === "emptied") item.bindings = null;
+    if (type === "emptied") {
+      item.bindings = null;
+      item.encrypted = false;
+    }
+    if (type === "encrypted") item.encrypted = true;
     this.markDirty(item);
   }
 
@@ -252,15 +401,25 @@ export class MediaTracker {
     this.markDirty(item);
   };
 
-  /** 绑定 EV_MEDIA 的 MSE 归因。target 为 null（无元素）时仅当本帧恰有一个播放中的元素才归属。 */
+  /**
+   * 绑定 EV_MEDIA 的 MSE 归因。target 为 null（无元素）时仅当本帧恰有一个播放中的元素才归属；
+   * target 是 closed shadow 宿主（事件被重定向到宿主）时，在其 shadow 树里找唯一的媒体元素。
+   */
   applyBinding(target: unknown, detail: MediaDetail): void {
     let item: Item | undefined;
     if (isMediaTag(target)) {
       this.adopt(target);
       item = this.itemOf(target);
     } else {
-      const playing = [...this.items.values()].filter((i) => i.playing);
-      if (playing.length === 1) item = playing[0];
+      const shadow = target instanceof Element ? shadowRootOf(target) : null;
+      const inside = shadow ? [...shadow.querySelectorAll("video,audio")] : [];
+      if (inside.length === 1 && isMediaTag(inside[0])) {
+        this.adopt(inside[0]);
+        item = this.itemOf(inside[0]);
+      } else {
+        const playing = [...this.items.values()].filter((i) => i.playing);
+        if (playing.length === 1) item = playing[0];
+      }
     }
     if (!item) return;
     item.bindings = detail;
@@ -288,10 +447,24 @@ export class MediaTracker {
     this.sendTimer = window.setTimeout(() => this.flush(), SEND_THROTTLE_MS);
   }
 
+  /** blob URL 对应的原始响应地址（hooks 在 createObjectURL 时还原）。 */
+  setBlobSource(blobUrl: string, url: string): void {
+    this.blobSources.set(blobUrl, url);
+    if (this.blobSources.size > 256) {
+      const oldest = this.blobSources.keys().next().value;
+      if (oldest !== undefined) this.blobSources.delete(oldest);
+    }
+    for (const item of this.items.values()) {
+      if (item.el.currentSrc === blobUrl) this.markDirty(item);
+    }
+  }
+
   private snapshot(item: Item): ElementPayload {
     const el = item.el;
     const rect = el.getBoundingClientRect();
-    const src = el.currentSrc || "";
+    // blob: 来源若是整段下载的响应（hooks 还原过），按原始地址上报
+    const rawSrc = el.currentSrc || "";
+    const src = this.blobSources.get(rawSrc) ?? rawSrc;
     const video = item.tag === "video" ? (el as HTMLVideoElement) : null;
     return {
       key: item.key,
@@ -305,6 +478,8 @@ export class MediaTracker {
       lastPlayedAt: item.lastPlayedAt,
       lastInteractionAt: item.lastInteractionAt,
       bindings: item.bindings?.sourceBuffers ?? [],
+      encrypted: item.encrypted || el.mediaKeys !== null,
+      title: this.titleOf(item),
       tracks: [...el.querySelectorAll("track")].map((t) => ({
         kind: t.kind,
         srclang: t.srclang,
@@ -334,9 +509,13 @@ export class MediaTracker {
     this.opts.send({ elements, removed });
   }
 
-  /** SPA 导航后 background 已清空元素状态：清掉发送去重并让所有现存元素重新上报。 */
-  resetSent(): void {
+  /**
+   * SPA 换页后 background 已清空元素状态：丢弃上一页的 MSE 归因证据（新页的追加会重新带来），
+   * 清掉发送去重并让所有现存元素重新上报。
+   */
+  resetForNavigation(): void {
     for (const [key, item] of this.items) {
+      item.bindings = null;
       item.lastSentJson = "";
       this.dirty.add(key);
     }
@@ -357,14 +536,15 @@ export class MediaTracker {
     return this.keys.get(el);
   }
 
-  /** 指针所在位置的视频：矩形命中（覆盖层是 video 的兄弟节点也命中），取面积最小者。 */
+  /** 指针所在位置的媒体元素（视频画面或音频控件条）：矩形命中（覆盖层是兄弟节点也命中），取面积最小者。 */
   elementAtPoint(x: number, y: number): TrackedMedia | null {
     let best: TrackedMedia | null = null;
     let bestArea = Infinity;
     for (const item of this.items.values()) {
-      if (item.tag !== "video" || !item.el.isConnected) continue;
+      if (!item.el.isConnected) continue;
       const r = item.el.getBoundingClientRect();
-      if (r.width < MIN_TARGET_W || r.height < MIN_TARGET_H) continue;
+      const min = minTargetSize(item.tag);
+      if (r.width < min.w || r.height < min.h) continue;
       if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
       const area = r.width * r.height;
       if (area < bestArea) {

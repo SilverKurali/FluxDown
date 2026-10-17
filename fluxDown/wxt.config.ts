@@ -112,6 +112,15 @@ export default defineConfig({
             ? "__MSG_extensionName__: Toggle download interception"
             : "Toggle download interception",
       },
+      "download-playing-media": {
+        suggested_key: {
+          default: "Alt+Shift+V",
+        },
+        description:
+          browser === "chrome"
+            ? "__MSG_extensionName__: Download the playing video or audio"
+            : "Download the playing video or audio",
+      },
     },
   }),
   // WXT bug: addDevModeCsp() 只给 script-src 加了 localhost，未加 style-src，

@@ -21,6 +21,11 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.fd-qp-note {
+  padding: 0 8px 4px;
+  color: var(--fd-warning, var(--fd-text-secondary));
+  font-size: 11px;
+}
 .fd-qp-item {
   display: flex;
   align-items: center;

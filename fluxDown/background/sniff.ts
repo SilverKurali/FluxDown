@@ -22,6 +22,8 @@ interface ParsedHeaders {
   dispositionByteCarrier: boolean;
   /** 小写名 → 值（供规则的 header 匹配）。 */
   all: Record<string, string>;
+  /** 已从 Content-Range 取得总长（或确认未知），Content-Length 不再覆盖。 */
+  rangeTotalKnown: boolean;
 }
 
 function parseHeaders(headers: Browser.webRequest.HttpHeader[]): ParsedHeaders {
@@ -31,6 +33,7 @@ function parseHeaders(headers: Browser.webRequest.HttpHeader[]): ParsedHeaders {
     contentDisposition: "",
     dispositionByteCarrier: false,
     all: {},
+    rangeTotalKnown: false,
   };
   for (const h of headers) {
     const name = h.name.toLowerCase();
@@ -39,7 +42,13 @@ function parseHeaders(headers: Browser.webRequest.HttpHeader[]): ParsedHeaders {
       parsed.contentType = h.value.split(";")[0].trim().toLowerCase();
     } else if (name === "content-length" && h.value) {
       const n = parseInt(h.value, 10);
-      if (!isNaN(n)) parsed.contentLength = n;
+      if (!isNaN(n) && !parsed.rangeTotalKnown) parsed.contentLength = n;
+    } else if (name === "content-range" && h.value) {
+      // 206 分段响应的 Content-Length 只是本段长度（播放器 Range 读取常只有几 KB）；
+      // 文件总长在 `bytes a-b/total` 里，未知（`*`）时视为大小未知。
+      const total = /\/\s*(\d+)\s*$/.exec(h.value);
+      parsed.contentLength = total ? parseInt(total[1], 10) : -1;
+      parsed.rangeTotalKnown = true;
     } else if (name === "content-disposition") {
       const d = readDispositionHeader(
         { value: h.value, binaryValue: h.binaryValue ? new Uint8Array(h.binaryValue) : undefined },
@@ -183,7 +192,8 @@ export function installSniff(): void {
         onMainFrameResponse(details);
         return undefined;
       },
-      { urls: ["<all_urls>"] },
+      // 让浏览器侧过滤：不带 types 时每个图片 / 脚本响应的头都会送进扩展再被丢弃
+      { urls: ["<all_urls>"], types: ["main_frame"] },
       ["responseHeaders"],
     );
     browser.webRequest.onHeadersReceived.addListener(
