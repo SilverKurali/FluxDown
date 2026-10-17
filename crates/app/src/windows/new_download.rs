@@ -517,7 +517,10 @@ fn submit(submission: NewDownloadSubmission, port: &Arc<AgentDownloadsPort>, cx:
                 }
             };
             let message = if message.is_empty() {
-                translator.read(cx).text("localServiceActionFailed").to_owned()
+                translator
+                    .read(cx)
+                    .text("localServiceActionFailed")
+                    .to_owned()
             } else {
                 message
             };
